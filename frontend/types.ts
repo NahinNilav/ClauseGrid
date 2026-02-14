@@ -11,7 +11,7 @@ export interface DocumentFile {
 }
 
 export interface SourceCitation {
-  source: 'pdf' | 'html' | 'txt';
+  source: 'pdf' | 'html' | 'txt' | 'docx';
   snippet: string;
   page?: number;
   bbox?: number[];
@@ -30,7 +30,7 @@ export interface ArtifactBlock {
 
 export interface ParsedArtifact {
   doc_version_id: string;
-  format: 'pdf' | 'html' | 'txt';
+  format: 'pdf' | 'html' | 'txt' | 'docx';
   mime_type?: string;
   markdown: string;
   blocks: ArtifactBlock[];
@@ -47,6 +47,118 @@ export interface ParsedArtifact {
 }
 
 export type ColumnType = 'text' | 'number' | 'date' | 'boolean' | 'list';
+
+export type ReviewStatus = 'CONFIRMED' | 'REJECTED' | 'MANUAL_UPDATED' | 'MISSING_DATA';
+export type ProjectStatus = 'DRAFT' | 'ACTIVE' | 'ARCHIVED';
+export type ExtractionRunStatus = 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'PARTIAL' | 'FAILED' | 'CANCELED';
+
+export interface TemplateFieldDefinition {
+  key: string;
+  name: string;
+  type: ColumnType | string;
+  prompt: string;
+  required?: boolean;
+}
+
+export interface TemplateVersion {
+  id: string;
+  template_id: string;
+  version_no: number;
+  fields_json: TemplateFieldDefinition[];
+  validation_policy_json?: Record<string, unknown>;
+  normalization_policy_json?: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  description?: string;
+  status: ProjectStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ReviewOverlay {
+  id?: string;
+  status: ReviewStatus;
+  manual_value?: string | null;
+  reviewer?: string | null;
+  notes?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface AIFieldExtraction {
+  id?: string;
+  extraction_run_id?: string;
+  document_version_id: string;
+  template_version_id: string;
+  field_key: string;
+  field_name: string;
+  field_type: string;
+  raw_text: string;
+  value: string;
+  normalized_value: string;
+  normalization_valid: number | boolean;
+  confidence_score: number;
+  citations_json: SourceCitation[] | SourceCitation;
+  evidence_summary?: string;
+  fallback_reason?: 'NOT_FOUND' | 'AMBIGUOUS' | 'PARSER_ERROR' | 'MODEL_ERROR' | null;
+  extraction_method?: 'deterministic' | 'llm_hybrid' | 'llm_reasoning';
+  model_name?: string | null;
+  retrieval_context_json?: Array<Record<string, unknown>>;
+  verifier_status?: 'PASS' | 'PARTIAL' | 'FAIL' | 'SKIPPED';
+  uncertainty_reason?: string | null;
+}
+
+export interface FieldCellView {
+  field_key: string;
+  ai_result: AIFieldExtraction | null;
+  review_overlay: ReviewOverlay | null;
+  effective_value: string;
+  is_diff: boolean;
+}
+
+export interface ExtractionRun {
+  id: string;
+  project_id: string;
+  template_version_id: string;
+  status: ExtractionRunStatus;
+  total_cells: number;
+  completed_cells: number;
+  failed_cells: number;
+  trigger_reason?: string;
+  error_message?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface EvaluationReport {
+  total_labels: number;
+  matched_labels: number;
+  field_level_accuracy: number;
+  coverage: number;
+  normalization_validity: number;
+  precision: number;
+  recall: number;
+  f1: number;
+  qualitative_notes: string[];
+}
+
+export interface RequestTask {
+  id: string;
+  project_id?: string | null;
+  task_type: string;
+  status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED';
+  entity_id?: string | null;
+  progress_current: number;
+  progress_total: number;
+  error_message?: string | null;
+  payload_json?: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
 
 export interface Column {
   id: string;

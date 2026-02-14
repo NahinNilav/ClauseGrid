@@ -44,3 +44,8 @@ instance/
 .env
 .env.local
 venv/
+
+# Local database artifacts
+legal_review.db
+*.db-shm
+*.db-wal

@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass
 from typing import Literal
 
-RoutedFormat = Literal["pdf", "html", "txt", "unsupported"]
+RoutedFormat = Literal["pdf", "html", "txt", "docx", "unsupported"]
 
 
 @dataclass
@@ -46,6 +46,17 @@ def route_file(*, filename: str, declared_mime_type: str | None, raw_bytes: byte
 
     if _looks_like_html(raw_bytes) or mime_type in {"text/html", "application/xhtml+xml"} or ext in {".html", ".htm", ".xhtml"}:
         return RoutedFile(format="html", mime_type="text/html", ext=ext, sha256=sha256)
+
+    if mime_type in {
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/msword",
+    } or ext in {".docx", ".doc"}:
+        return RoutedFile(
+            format="docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ext=ext,
+            sha256=sha256,
+        )
 
     if mime_type.startswith("text/plain") or ext in {".txt", ".text", ".md"}:
         return RoutedFile(format="txt", mime_type="text/plain", ext=ext, sha256=sha256)

@@ -20,12 +20,15 @@ from pydantic import BaseModel, Field
 
 from artifact_schema import build_citation_index, make_artifact
 from chunker import chunk_blocks
+from legal_api import router as legal_router
 from mime_router import route_file
+from parsers.docx_docling import parse_docx_with_docling
 from parsers.html_docling import parse_html_with_docling
 from parsers.pdf_docling import parse_pdf
 from parsers.text_plain import parse_text
 
 app = FastAPI()
+app.include_router(legal_router)
 
 # Configure logging
 logger = logging.getLogger("tabular.server")
@@ -71,6 +74,7 @@ def create_html_converter() -> DocumentConverter:
 
 
 html_converter = create_html_converter()
+docx_converter = DocumentConverter()
 
 
 @app.middleware("http")
@@ -172,6 +176,13 @@ async def convert_document(request: Request, file: UploadFile = File(...)):
                 converter=html_converter,
                 raw_bytes=raw_bytes,
                 filename=file.filename or "document.html",
+            )
+
+        elif routed.format == "docx":
+            parser_result = parse_docx_with_docling(
+                converter=docx_converter,
+                raw_bytes=raw_bytes,
+                filename=file.filename or "document.docx",
             )
 
         else:

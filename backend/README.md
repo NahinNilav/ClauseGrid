@@ -1,39 +1,58 @@
-Backend Skeleton (Minimal Framework)
+Backend Service (FastAPI + SQLite)
 
 Purpose
-This folder holds the backend service implementation for the Questionnaire
-Agent. It uses a minimal FastAPI setup and serves as the starting point for
-implementation.
+Implements legal tabular review workflows with persistent projects, versioned
+templates, extraction runs, review overlays, evaluation runs, and async task
+tracking.
 
-Planned Modules
-- src/api/        HTTP route handlers for the listed endpoints
-- src/models/     Data models mirroring the spec data structures
-- src/services/   Core business logic (project, answers, ingestion, evaluation)
-- src/indexing/   Multi-layer indexing pipeline and chunking
-- src/storage/    Persistence layer (DB, vector store, object storage)
-- src/workers/    Async/background processing and request status tracking
-- src/utils/      Shared helpers, validation, and constants
+Core Modules
+- `app.py` - existing parser/render endpoints + router mount
+- `legal_api.py` - `/api/*` workflow endpoints
+- `legal_service.py` - business logic for lifecycle transitions
+- `legal_db.py` - SQLite schema and data access
+- `parsers/*` - PDF/HTML/DOCX/TXT parsing
 
-Endpoints (to be implemented)
-- POST /create-project-async
-- POST /generate-single-answer
-- POST /generate-all-answers
-- POST /update-project-async
-- POST /update-answer
-- GET /get-project-info
-- GET /get-project-status
-- POST /index-document-async
-- GET /get-request-status
+Workflow API
+- `POST /api/projects`
+- `PATCH /api/projects/{project_id}`
+- `GET /api/projects`
+- `GET /api/projects/{project_id}`
+- `POST /api/projects/{project_id}/documents`
+- `GET /api/projects/{project_id}/documents`
+- `POST /api/projects/{project_id}/templates`
+- `POST /api/templates/{template_id}/versions`
+- `GET /api/projects/{project_id}/templates`
+- `POST /api/projects/{project_id}/extraction-runs`
+- `GET /api/projects/{project_id}/extraction-runs/{run_id}`
+- `GET /api/projects/{project_id}/table-view`
+- `POST /api/projects/{project_id}/review-decisions`
+- `GET /api/projects/{project_id}/review-decisions`
+- `POST /api/projects/{project_id}/ground-truth-sets`
+- `POST /api/projects/{project_id}/evaluation-runs`
+- `GET /api/projects/{project_id}/evaluation-runs/{eval_run_id}`
+- `POST /api/projects/{project_id}/annotations`
+- `GET /api/projects/{project_id}/annotations`
+- `GET /api/tasks/{task_id}`
 
-Current Local Endpoint
+Legacy/Parser APIs
 - `POST /convert`
-  - Routes uploaded files by content sniffing + MIME:
-    - PDF (`application/pdf` or `%PDF` header)
-    - HTML/HTM (`text/html` or HTML markers)
-    - TXT/MD (plain text)
-  - Returns backward-compatible `markdown` plus a rich `artifact` payload:
-    - `doc_version_id`, `format`, `mime_type`, `ext`, `sha256`
-    - `blocks`, `chunks`, and `citation_index`
-  - Citation strategy:
-    - PDF: page-based citations (with bbox when available)
-    - HTML: selector + character offsets in DOM text
+- `POST /render-pdf-page`
+- `POST /events`
+
+Database
+- SQLite file path: `backend/legal_review.db` (override with `LEGAL_REVIEW_DB`)
+- Schema includes:
+  - projects, documents, document_versions
+  - field_templates, field_template_versions
+  - extraction_runs, field_extractions
+  - review_decisions, annotations
+  - ground_truth_sets, ground_truth_labels, evaluation_runs
+  - request_tasks, audit_events
+
+Gemini Configuration (Hybrid / LLM Modes)
+- Install deps from `backend/requirements.txt` (includes `google-genai`).
+- Set `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) for backend LLM extraction.
+- Optional model overrides:
+  - `LEGAL_EXTRACTION_MODEL` (default: `gemini-3-pro-preview`)
+  - `LEGAL_EXTRACTION_FAST_MODEL` (default: `gemini-3-flash-preview`)
+  - `LEGAL_VERIFIER_MODEL` (default: value of `LEGAL_EXTRACTION_MODEL`)

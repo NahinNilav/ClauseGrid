@@ -1,986 +1,1142 @@
-import React, { useState, useRef } from 'react';
-import { DataGrid } from './components/DataGrid';
-import { VerificationSidebar } from './components/VerificationSidebar';
-import { ChatInterface } from './components/ChatInterface';
-import { AddColumnMenu } from './components/AddColumnMenu';
-import { ColumnLibrary } from './components/ColumnLibrary';
-import { AgenticLoadingOverlay } from './components/AgenticLoadingOverlay';
-import { extractColumnData } from './services/geminiService';
-import { processDocumentToMarkdown } from './services/documentProcessor';
-import { createRunId, logRuntimeEvent } from './services/runtimeLogger';
-import { DocumentFile, Column, ExtractionResult, SidebarMode, ColumnType, SavedProject, ColumnTemplate } from './types';
-import { MessageSquare, Table, Square, FilePlus, LayoutTemplate, ChevronDown, Zap, Cpu, Brain, Trash2, Play, Download, WrapText, Loader2, Save, FolderOpen, RefreshCw, MoreHorizontal } from './components/Icons';
-import { SAMPLE_COLUMNS } from './utils/sampleData';
-import { saveProject, loadProject } from './utils/fileStorage';
+import React, { useEffect, useMemo, useState } from 'react';
+import { api } from './services/legalReviewApi';
+import {
+  AIFieldExtraction,
+  DocumentFile,
+  EvaluationReport,
+  ExtractionCell,
+  Project,
+  RequestTask,
+  ReviewStatus,
+  SourceCitation,
+  TemplateFieldDefinition,
+} from './types';
+import { DocumentViewer } from './components/document-viewers';
 
-// Available Models
-const MODELS = [
-  { id: 'gemini-3-pro-preview', name: 'Gemini 3 Pro', description: 'Deepest Reasoning', icon: Brain },
-  { id: 'gemini-2.5-pro-preview', name: 'Gemini 2.5 Pro', description: 'Balanced', icon: Cpu },
-  { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', description: 'Fastest', icon: Zap },
+const REVIEW_STATUSES: ReviewStatus[] = [
+  'CONFIRMED',
+  'REJECTED',
+  'MANUAL_UPDATED',
+  'MISSING_DATA',
+];
+
+type WorkspaceTab = 'documents' | 'templates' | 'table' | 'evaluation' | 'annotations';
+type ExtractionMode = 'deterministic' | 'hybrid' | 'llm_reasoning';
+type QualityProfile = 'high' | 'balanced' | 'fast';
+
+const EXTRACTION_MODES: ExtractionMode[] = ['hybrid', 'deterministic', 'llm_reasoning'];
+const QUALITY_PROFILES: QualityProfile[] = ['high', 'balanced', 'fast'];
+
+interface TableCell {
+  field_key: string;
+  ai_result: AIFieldExtraction | null;
+  review_overlay: {
+    id?: string;
+    status: ReviewStatus;
+    manual_value?: string | null;
+    reviewer?: string | null;
+    notes?: string | null;
+  } | null;
+  effective_value: string;
+  is_diff: boolean;
+}
+
+interface TableRow {
+  document_id: string;
+  document_version_id: string;
+  filename: string;
+  artifact: any;
+  parse_status: string;
+  cells: Record<string, TableCell>;
+}
+
+interface TableViewPayload {
+  project_id: string;
+  template_version_id: string;
+  extraction_run_id: string | null;
+  columns: TemplateFieldDefinition[];
+  rows: TableRow[];
+}
+
+const toBase64 = (value: string): string => {
+  try {
+    return btoa(unescape(encodeURIComponent(value || '')));
+  } catch {
+    return btoa(value || '');
+  }
+};
+
+const confidenceLabel = (score: number): 'High' | 'Medium' | 'Low' => {
+  if (score >= 0.75) return 'High';
+  if (score >= 0.45) return 'Medium';
+  return 'Low';
+};
+
+const toCitationArray = (citations: AIFieldExtraction['citations_json']): SourceCitation[] => {
+  if (!citations) return [];
+  if (Array.isArray(citations)) return citations as SourceCitation[];
+  if (typeof citations === 'object') return [citations as SourceCitation];
+  return [];
+};
+
+const toLegacyCell = (cell: TableCell | null): ExtractionCell | null => {
+  if (!cell || !cell.ai_result) return null;
+  const ai = cell.ai_result;
+  const citations = toCitationArray(ai.citations_json);
+  return {
+    value: cell.effective_value || ai.value || '',
+    confidence: confidenceLabel(ai.confidence_score || 0),
+    quote: ai.raw_text || ai.value || '',
+    page: citations?.[0]?.page || 1,
+    reasoning: ai.evidence_summary || '',
+    citations,
+    status: cell.review_overlay?.status === 'CONFIRMED' ? 'verified' : 'needs_review',
+  };
+};
+
+const toViewerDocument = (row: TableRow): DocumentFile => {
+  const markdown = row.artifact?.markdown || '';
+  return {
+    id: row.document_id,
+    name: row.filename,
+    type: row.artifact?.mime_type || 'text/plain',
+    size: markdown.length,
+    content: toBase64(markdown),
+    mimeType: 'text/markdown',
+    artifact: row.artifact,
+  };
+};
+
+const defaultFields: TemplateFieldDefinition[] = [
+  {
+    key: 'parties_entities',
+    name: 'Parties and Entities',
+    type: 'text',
+    prompt: 'Extract the parties/entities to this legal agreement.',
+    required: true,
+  },
+  {
+    key: 'effective_date',
+    name: 'Effective Date',
+    type: 'date',
+    prompt: 'Extract the effective date of the agreement.',
+    required: true,
+  },
+  {
+    key: 'dispute_resolution',
+    name: 'Dispute Resolution',
+    type: 'text',
+    prompt: 'Extract dispute resolution clause and governing approach.',
+    required: false,
+  },
+  {
+    key: 'payment_terms',
+    name: 'Payment Terms',
+    type: 'text',
+    prompt: 'Extract payment terms or timing obligations.',
+    required: false,
+  },
 ];
 
 const App: React.FC = () => {
-  // State
-  const [documents, setDocuments] = useState<DocumentFile[]>([]);
-  const [projectName, setProjectName] = useState('Untitled Project');
-  const [isEditingProjectName, setIsEditingProjectName] = useState(false);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [selectedProject, setSelectedProject] = useState<Project | null>(null);
 
-  // Start with empty columns for a clean slate
-  const [columns, setColumns] = useState<Column[]>([]);
-  const [results, setResults] = useState<ExtractionResult>({});
-  
-  const [sidebarMode, setSidebarMode] = useState<SidebarMode>('none');
-  const [selectedCell, setSelectedCell] = useState<{ docId: string; colId: string } | null>(null);
-  const [previewDocId, setPreviewDocId] = useState<string | null>(null);
-  
-  // Verification Sidebar Expansion State
-  const [isSidebarExpanded, setIsSidebarExpanded] = useState(false);
-  
-  // Model State
-  const [selectedModel, setSelectedModel] = useState<string>(MODELS[0].id);
-  const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
+  const [documents, setDocuments] = useState<any[]>([]);
+  const [templates, setTemplates] = useState<any[]>([]);
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
+  const [selectedTemplateVersionId, setSelectedTemplateVersionId] = useState<string | null>(null);
 
-  // Add/Edit Column Menu State
-  const [addColumnAnchor, setAddColumnAnchor] = useState<DOMRect | null>(null);
-  const [editingColumnId, setEditingColumnId] = useState<string | null>(null);
-  
-  // Column Library State
-  const [isLibraryOpen, setIsLibraryOpen] = useState(false);
+  const [tableView, setTableView] = useState<TableViewPayload | null>(null);
+  const [selectedRowVersionId, setSelectedRowVersionId] = useState<string | null>(null);
+  const [selectedFieldKey, setSelectedFieldKey] = useState<string | null>(null);
+  const [baselineDocumentId, setBaselineDocumentId] = useState<string>('');
 
-  // Extraction Control
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [isConverting, setIsConverting] = useState(false);
-  const [processingProgress, setProcessingProgress] = useState<{ current: number; total: number } | null>(null);
-  const abortControllerRef = useRef<AbortController | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  
-  // Text Wrap State
-  const [isTextWrapEnabled, setIsTextWrapEnabled] = useState(false);
+  const [annotations, setAnnotations] = useState<any[]>([]);
+  const [reviewStatus, setReviewStatus] = useState<ReviewStatus>('CONFIRMED');
+  const [manualValue, setManualValue] = useState<string>('');
+  const [reviewer, setReviewer] = useState<string>('analyst@demo.local');
+  const [reviewNotes, setReviewNotes] = useState<string>('');
+  const [annotationBody, setAnnotationBody] = useState<string>('');
 
-  // Workflows Menu State
-  const [isWorkflowsMenuOpen, setIsWorkflowsMenuOpen] = useState(false);
+  const [groundTruthName, setGroundTruthName] = useState<string>('Demo Ground Truth');
+  const [groundTruthInput, setGroundTruthInput] = useState<string>('[]');
+  const [groundTruthSetId, setGroundTruthSetId] = useState<string>('');
+  const [evaluationRunId, setEvaluationRunId] = useState<string>('');
+  const [evaluationReport, setEvaluationReport] = useState<EvaluationReport | null>(null);
 
-  // Document Selection State (for re-run)
-  const [selectedDocIds, setSelectedDocIds] = useState<Set<string>>(new Set());
+  const [newProjectName, setNewProjectName] = useState<string>('Legal Tabular Review Project');
+  const [newProjectDescription, setNewProjectDescription] = useState<string>('Take-home demo project for legal contract comparison.');
 
-  const toBase64 = (buffer: ArrayBuffer): string => {
-    const bytes = new Uint8Array(buffer);
-    const chunkSize = 0x8000;
-    let binary = '';
-    for (let i = 0; i < bytes.length; i += chunkSize) {
-      const chunk = bytes.subarray(i, i + chunkSize);
-      binary += String.fromCharCode(...chunk);
+  const [templateName, setTemplateName] = useState<string>('Default Legal Template');
+  const [draftFields, setDraftFields] = useState<TemplateFieldDefinition[]>(defaultFields);
+
+  const [tab, setTab] = useState<WorkspaceTab>('documents');
+  const [tasks, setTasks] = useState<Record<string, RequestTask>>({});
+  const [pendingTaskIds, setPendingTaskIds] = useState<string[]>([]);
+  const [error, setError] = useState<string>('');
+  const [busy, setBusy] = useState<boolean>(false);
+  const [extractionMode, setExtractionMode] = useState<ExtractionMode>('hybrid');
+  const [qualityProfile, setQualityProfile] = useState<QualityProfile>('high');
+  const [showUnresolvedOnly, setShowUnresolvedOnly] = useState<boolean>(false);
+  const [showLowConfidenceOnly, setShowLowConfidenceOnly] = useState<boolean>(false);
+
+  const selectedCell = useMemo(() => {
+    if (!tableView || !selectedRowVersionId || !selectedFieldKey) return null;
+    const row = tableView.rows.find((r) => r.document_version_id === selectedRowVersionId);
+    if (!row) return null;
+    const cell = row.cells[selectedFieldKey];
+    if (!cell) return null;
+    return { row, cell };
+  }, [tableView, selectedRowVersionId, selectedFieldKey]);
+
+  const rowHasUnresolved = (row: TableRow): boolean =>
+    (tableView?.columns || []).some((col) => {
+      const cell = row.cells[col.key];
+      const ai = cell?.ai_result;
+      if (!ai) return true;
+      if (ai.fallback_reason) return true;
+      if ((ai.verifier_status || 'SKIPPED') === 'FAIL') return true;
+      if ((ai.verifier_status || 'SKIPPED') === 'PARTIAL') return true;
+      if ((ai.confidence_score || 0) < 0.55) return true;
+      return false;
+    });
+
+  const rowHasLowConfidence = (row: TableRow): boolean =>
+    (tableView?.columns || []).some((col) => {
+      const score = row.cells[col.key]?.ai_result?.confidence_score || 0;
+      return score < 0.55;
+    });
+
+  const displayRows = useMemo(() => {
+    if (!tableView) return [];
+    let rows = tableView.rows || [];
+    if (showUnresolvedOnly) {
+      rows = rows.filter((row) => rowHasUnresolved(row));
     }
-    return btoa(binary);
-  };
+    if (showLowConfidenceOnly) {
+      rows = rows.filter((row) => rowHasLowConfidence(row));
+    }
+    return rows;
+  }, [tableView, showUnresolvedOnly, showLowConfidenceOnly]);
 
-  // Handlers
-  
-  // Project Save/Load Handlers
-  const handleSaveProject = async () => {
-    const project: SavedProject = {
-      version: 1,
-      name: projectName,
-      savedAt: new Date().toISOString(),
-      columns: columns,
-      documents: documents,
-      results: results,
-      selectedModel: selectedModel
-    };
-    
+  const refreshProjects = async () => {
     try {
-      const success = await saveProject(project);
-      if (success) {
-        // Brief visual feedback could be added here
+      const data = await api.listProjects();
+      setProjects(data.projects || []);
+      if (!selectedProjectId && data.projects?.length) {
+        setSelectedProjectId(data.projects[0].id);
       }
-    } catch (error) {
-      console.error('Failed to save project:', error);
-      alert('Failed to save project. Please try again.');
+    } catch (err: any) {
+      setError(err.message || 'Failed to load projects');
     }
   };
 
-  const handleLoadProject = async () => {
-    // Warn if there's unsaved work
-    const hasWork = documents.length > 0 || columns.length > 0 || Object.keys(results).length > 0;
-    if (hasWork && !window.confirm('Loading a project will replace your current work. Continue?')) {
-      return;
-    }
-    
+  const refreshProjectContext = async (projectId: string, loadTable = false) => {
     try {
-      const project = await loadProject();
-      if (project) {
-        setProjectName(project.name);
-        setColumns(project.columns);
-        setDocuments(project.documents);
-        setResults(project.results);
-        if (project.selectedModel) {
-          setSelectedModel(project.selectedModel);
-        }
-        // Reset UI state
-        setSidebarMode('none');
-        setSelectedCell(null);
-        setPreviewDocId(null);
-        setSelectedDocIds(new Set());
+      const data = await api.getProject(projectId);
+      setSelectedProject(data.project);
+      setDocuments(data.documents || []);
+      setTemplates(data.templates || []);
+
+      let nextTemplateId = selectedTemplateId;
+      let nextTemplateVersionId = selectedTemplateVersionId;
+
+      if (!nextTemplateId || !(data.templates || []).some((t: any) => t.id === nextTemplateId)) {
+        const activeTemplate = (data.templates || []).find((t: any) => t.status === 'ACTIVE') || data.templates?.[0] || null;
+        nextTemplateId = activeTemplate?.id || null;
+        nextTemplateVersionId = activeTemplate?.active_version_id || activeTemplate?.versions?.[0]?.id || null;
       }
-    } catch (error) {
-      console.error('Failed to load project:', error);
-      alert('Failed to load project. The file may be corrupted or invalid.');
-    }
-  };
-  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    if (event.target.files && event.target.files.length > 0) {
-      const fileList: File[] = Array.from(event.target.files);
-      processUploadedFiles(fileList);
-      // Reset input
-      event.target.value = '';
-    }
-  };
 
-  const processUploadedFiles = async (fileList: File[]) => {
-    const uploadRunId = createRunId('upload');
-    const uploadStartedAt = performance.now();
+      setSelectedTemplateId(nextTemplateId);
+      setSelectedTemplateVersionId(nextTemplateVersionId);
 
-    logRuntimeEvent({
-      event: 'upload_batch_started',
-      stage: 'upload',
-      runId: uploadRunId,
-      metadata: {
-        file_count: fileList.length,
-        file_names: fileList.map((file) => file.name),
-      },
-    });
-
-    setIsConverting(true);
-    setProcessingProgress({ current: 0, total: fileList.length });
-    try {
-        const processedFiles: DocumentFile[] = [];
-
-        for (let i = 0; i < fileList.length; i++) {
-          const file = fileList[i];
-          const sourceArrayBuffer = await file.arrayBuffer();
-          const sourceContentBase64 = toBase64(sourceArrayBuffer);
-          
-          // Use local deterministic processor (markitdown style)
-          const processedDoc = await processDocumentToMarkdown(file);
-          const markdownContent = processedDoc.markdown;
-          
-          // Encode to Base64 to match our storage format (mimicking the sample data structure)
-          // This keeps the rest of the app (which expects base64 strings for "content") happy
-          const contentBase64 = btoa(unescape(encodeURIComponent(markdownContent)));
-
-          processedFiles.push({
-            id: Math.random().toString(36).substring(2, 9),
-            name: file.name,
-            type: file.type,
-            size: file.size,
-            content: contentBase64,
-            mimeType: 'text/markdown', // Force to markdown so the viewer treats it as text
-            sourceContentBase64,
-            sourceMimeType: file.type || processedDoc.artifact?.mime_type || 'application/octet-stream',
-            artifact: processedDoc.artifact,
-          });
-
-          // Update progress AFTER file is processed
-          setProcessingProgress({ current: i + 1, total: fileList.length });
-
-          logRuntimeEvent({
-            event: 'upload_document_ready',
-            stage: 'upload',
-            runId: uploadRunId,
-            metadata: {
-              file_name: file.name,
-              file_size_bytes: file.size,
-              artifact_format: processedDoc.artifact?.format || 'none',
-              citation_count: Object.keys(processedDoc.artifact?.citation_index || {}).length,
-            },
-          });
-        }
-
-        setDocuments(prev => [...prev, ...processedFiles]);
-        logRuntimeEvent({
-          event: 'upload_batch_completed',
-          stage: 'upload',
-          runId: uploadRunId,
-          metadata: {
-            processed_count: processedFiles.length,
-            duration_ms: Math.round(performance.now() - uploadStartedAt),
-          },
-        });
-    } catch (error) {
-        console.error("Failed to process files:", error);
-        logRuntimeEvent({
-          event: 'upload_batch_failed',
-          level: 'error',
-          stage: 'upload',
-          runId: uploadRunId,
-          message: error instanceof Error ? error.message : 'Unknown upload error',
-          metadata: {
-            duration_ms: Math.round(performance.now() - uploadStartedAt),
-          },
-        });
-        alert("Error processing some files. Please check if they are valid PDF or DOCX documents.");
-    } finally {
-        // Small delay to ensure the completion animation plays
-        setTimeout(() => {
-          setIsConverting(false);
-          setProcessingProgress(null);
-        }, 800);
-    }
-  };
-
-  const handleLoadSample = () => {
-    const sampleCols = SAMPLE_COLUMNS;
-
-    // setDocuments([]); // Keep existing documents
-    setColumns(sampleCols);
-    setResults({}); // Reset results as columns have changed
-    setSidebarMode('none');
-    setProjectName('PE Side Letters Review');
-    setPreviewDocId(null);
-    setSelectedCell(null);
-  };
-
-  const handleClearAll = () => {
-    // Only confirm if actual analysis work (results) exists.
-    // If just documents are loaded, clear immediately for better UX.
-    const hasWork = Object.keys(results).length > 0;
-    
-    if (hasWork && !window.confirm("Are you sure you want to clear the project? Analysis results will be lost.")) {
-      return;
-    }
-
-    // Abort processing
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-    }
-    setIsProcessing(false);
-
-    // Reset State completely
-    setDocuments([]);
-    setColumns([]);
-    setResults({});
-    setSidebarMode('none');
-    setSelectedCell(null);
-    setPreviewDocId(null);
-    setProjectName('Untitled Project');
-    setAddColumnAnchor(null);
-    setEditingColumnId(null);
-
-    // Reset file input
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
-    }
-  };
-
-  const handleRemoveDoc = (docId: string) => {
-    setDocuments(prev => prev.filter(d => d.id !== docId));
-    setResults(prev => {
-      const next = { ...prev };
-      delete next[docId];
-      return next;
-    });
-    if (selectedCell?.docId === docId) {
-      setSidebarMode('none');
-      setSelectedCell(null);
-    }
-    if (previewDocId === docId) {
-      setPreviewDocId(null);
-      setSidebarMode('none');
-    }
-  };
-
-  const handleSaveColumn = (colDef: { name: string; type: ColumnType; prompt: string }) => {
-    if (editingColumnId) {
-      // Update existing column
-      setColumns(prev => prev.map(c => c.id === editingColumnId ? { ...c, ...colDef } : c));
-      setEditingColumnId(null);
-    } else {
-      // Create new column
-      const newCol: Column = {
-        id: `col_${Date.now()}`,
-        name: colDef.name,
-        type: colDef.type,
-        prompt: colDef.prompt,
-        status: 'idle',
-        width: 250 // Default width
-      };
-      setColumns(prev => [...prev, newCol]);
-    }
-    setAddColumnAnchor(null);
-  };
-  
-  const handleDeleteColumn = () => {
-    if (editingColumnId) {
-        setColumns(prev => prev.filter(c => c.id !== editingColumnId));
-        // Clean up results for this column
-        setResults(prev => {
-            const next = { ...prev };
-            Object.keys(next).forEach(docId => {
-                if (next[docId] && next[docId][editingColumnId]) {
-                    // We create a copy of the doc results to avoid mutation
-                    const docResults = { ...next[docId] };
-                    delete docResults[editingColumnId];
-                    next[docId] = docResults;
-                }
-            });
-            return next;
-        });
-        
-        if (selectedCell?.colId === editingColumnId) {
-            setSelectedCell(null);
-            setSidebarMode('none');
-        }
-        
-        setEditingColumnId(null);
-        setAddColumnAnchor(null);
-    }
-  };
-
-  const handleEditColumn = (colId: string, rect: DOMRect) => {
-    setEditingColumnId(colId);
-    setAddColumnAnchor(rect);
-  };
-  
-  const handleColumnResize = (colId: string, newWidth: number) => {
-    setColumns(prev => prev.map(c => c.id === colId ? { ...c, width: newWidth } : c));
-  };
-
-  const handleCloseMenu = () => {
-    setAddColumnAnchor(null);
-    setEditingColumnId(null);
-  };
-
-  const handleSelectTemplate = (template: ColumnTemplate) => {
-    // Create a new column from the template
-    const newCol: Column = {
-      id: `col_${Date.now()}`,
-      name: template.name,
-      type: template.type,
-      prompt: template.prompt,
-      status: 'idle',
-      width: 250
-    };
-    setColumns(prev => [...prev, newCol]);
-    setIsLibraryOpen(false);
-  };
-
-  const handleOpenLibrary = () => {
-    setAddColumnAnchor(null);
-    setIsLibraryOpen(true);
-  };
-
-  const handleStopExtraction = () => {
-    if (abortControllerRef.current) {
-      logRuntimeEvent({
-        event: 'analysis_stop_requested',
-        stage: 'analysis',
-        message: 'User requested to stop extraction',
-      });
-      abortControllerRef.current.abort();
-      setIsProcessing(false);
-    }
-  };
-
-  const handleRunAnalysis = () => {
-    if (documents.length === 0 || columns.length === 0) return;
-    processExtraction(documents, columns);
-  };
-
-  const handleRerunSelected = () => {
-    if (selectedDocIds.size === 0 || columns.length === 0) return;
-    
-    // Get selected documents
-    const selectedDocs = documents.filter(d => selectedDocIds.has(d.id));
-    
-    // Clear existing results for selected documents
-    setResults(prev => {
-      const next = { ...prev };
-      selectedDocIds.forEach(docId => {
-        delete next[docId];
-      });
-      return next;
-    });
-    
-    // Run extraction on selected documents
-    processExtraction(selectedDocs, columns, true);
-  };
-
-  const handleToggleDocSelection = (docId: string) => {
-    setSelectedDocIds(prev => {
-      const next = new Set(prev);
-      if (next.has(docId)) {
-        next.delete(docId);
-      } else {
-        next.add(docId);
+      if (loadTable && nextTemplateVersionId) {
+        const table = await api.getTableView(projectId, nextTemplateVersionId, baselineDocumentId || undefined);
+        setTableView(table);
       }
-      return next;
-    });
-  };
 
-  const handleToggleAllDocSelection = () => {
-    if (selectedDocIds.size === documents.length) {
-      // Deselect all
-      setSelectedDocIds(new Set());
-    } else {
-      // Select all
-      setSelectedDocIds(new Set(documents.map(d => d.id)));
+      const annotationData = await api.listAnnotations(projectId, nextTemplateVersionId || undefined);
+      setAnnotations(annotationData.annotations || []);
+    } catch (err: any) {
+      setError(err.message || 'Failed to refresh project context');
     }
   };
 
-  const handleExportCSV = () => {
-    if (documents.length === 0) return;
+  useEffect(() => {
+    void refreshProjects();
+  }, []);
 
-    // Headers
-    const headerRow = ['Document Name', ...columns.map(c => c.name)];
-    
-    // Rows
-    const rows = documents.map(doc => {
-      const rowData = [doc.name];
-      columns.forEach(col => {
-        const cell = results[doc.id]?.[col.id];
-        // Escape double quotes with two double quotes
-        const val = cell ? cell.value.replace(/"/g, '""') : "";
-        rowData.push(`"${val}"`);
-      });
-      return rowData.join(",");
-    });
+  useEffect(() => {
+    if (!selectedProjectId) return;
+    void refreshProjectContext(selectedProjectId, tab === 'table');
+  }, [selectedProjectId]);
 
-    const csvContent = [headerRow.join(","), ...rows].join("\n");
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement('a');
-    const url = URL.createObjectURL(blob);
-    link.setAttribute('href', url);
-    link.setAttribute('download', `${projectName.replace(/\s+/g, '_').toLowerCase()}_export.csv`);
-    link.style.visibility = 'hidden';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
+  useEffect(() => {
+    if (!pendingTaskIds.length) return;
+    const timer = setInterval(async () => {
+      for (const taskId of pendingTaskIds) {
+        try {
+          const data = await api.getTask(taskId);
+          const task = data.task;
+          setTasks((prev) => ({ ...prev, [taskId]: task }));
 
-  const processExtraction = async (docsToProcess: DocumentFile[], colsToProcess: Column[], forceOverwrite: boolean = false) => {
-    const analysisRunId = createRunId(forceOverwrite ? 'rerun' : 'analysis');
-    const analysisStartedAt = performance.now();
+          if (task.status === 'SUCCEEDED' || task.status === 'FAILED') {
+            setPendingTaskIds((prev) => prev.filter((id) => id !== taskId));
 
-    // Cancel any previous run
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      logRuntimeEvent({
-        event: 'analysis_previous_run_aborted',
-        stage: 'analysis',
-        runId: analysisRunId,
-      });
-    }
-    
-    // Start new run
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
-    setIsProcessing(true);
+            if (selectedProjectId) {
+              await refreshProjectContext(selectedProjectId, tab === 'table');
+            }
 
-    try {
-      logRuntimeEvent({
-        event: 'analysis_started',
-        stage: 'analysis',
-        runId: analysisRunId,
-        metadata: {
-          model_id: selectedModel,
-          document_count: docsToProcess.length,
-          column_count: colsToProcess.length,
-          overwrite_existing: forceOverwrite,
-        },
-      });
-
-      // Mark all target columns as extracting initially
-      setColumns(prev => prev.map(c => colsToProcess.some(target => target.id === c.id) ? { ...c, status: 'extracting' } : c));
-
-      // 1. Flatten all tasks: Create a list of {doc, col} pairs for every cell that needs processing
-      const tasks: { doc: DocumentFile; col: Column }[] = [];
-      
-      for (const doc of docsToProcess) {
-          for (const col of colsToProcess) {
-             // Only add task if result doesn't exist or forceOverwrite is true
-             if (forceOverwrite || !results[doc.id]?.[col.id]) {
-                 tasks.push({ doc, col });
-             }
+            if (task.task_type === 'EVALUATION_RUN' && task.status === 'SUCCEEDED' && selectedProjectId) {
+              const payload = (task.payload_json || {}) as any;
+              const evalId = payload?.evaluation_run_id || evaluationRunId;
+              if (evalId) {
+                const evalData = await api.getEvaluationRun(selectedProjectId, evalId);
+                setEvaluationRunId(evalId);
+                setEvaluationReport(evalData.evaluation_run?.metrics_json || null);
+              }
+            }
           }
+        } catch {
+          // Ignore transient polling failures.
+        }
       }
+    }, 1500);
+    return () => clearInterval(timer);
+  }, [pendingTaskIds, selectedProjectId, tab, evaluationRunId]);
 
-      const totalPossibleCells = docsToProcess.length * colsToProcess.length;
-      const skippedCells = totalPossibleCells - tasks.length;
-      let successCount = 0;
-      let failureCount = 0;
-
-      logRuntimeEvent({
-        event: 'analysis_task_queue_built',
-        stage: 'analysis',
-        runId: analysisRunId,
-        metadata: {
-          total_possible_cells: totalPossibleCells,
-          queued_tasks: tasks.length,
-          skipped_existing_cells: skippedCells,
-        },
+  const createProject = async () => {
+    if (!newProjectName.trim()) return;
+    setBusy(true);
+    setError('');
+    try {
+      const data = await api.createProject({
+        name: newProjectName.trim(),
+        description: newProjectDescription,
       });
-
-      // 2. Process EVERYTHING concurrently (Simultaneous)
-      // Removed batching logic as requested to maximize speed
-      const promises = tasks.map(async ({ doc, col }) => {
-          if (controller.signal.aborted) return;
-
-          logRuntimeEvent({
-            event: 'column_extraction_started',
-            stage: 'analysis',
-            runId: analysisRunId,
-            metadata: {
-              document_id: doc.id,
-              document_name: doc.name,
-              column_id: col.id,
-              column_name: col.name,
-              column_type: col.type,
-            },
-          });
-
-          try {
-              const data = await extractColumnData(doc, col, selectedModel);
-              if (controller.signal.aborted) return;
-
-              setResults(prev => ({
-                  ...prev,
-                  [doc.id]: {
-                      ...(prev[doc.id] || {}),
-                      [col.id]: data
-                  }
-              }));
-              successCount += 1;
-
-              logRuntimeEvent({
-                event: 'column_extraction_completed',
-                stage: 'analysis',
-                runId: analysisRunId,
-                metadata: {
-                  document_id: doc.id,
-                  document_name: doc.name,
-                  column_id: col.id,
-                  column_name: col.name,
-                  confidence: data.confidence,
-                  value_chars: data.value.length,
-                },
-              });
-          } catch (e) {
-              failureCount += 1;
-              console.error(`Failed to extract ${col.name} for ${doc.name}`, e);
-              logRuntimeEvent({
-                event: 'column_extraction_failed',
-                level: 'error',
-                stage: 'analysis',
-                runId: analysisRunId,
-                message: e instanceof Error ? e.message : 'Unknown extraction error',
-                metadata: {
-                  document_id: doc.id,
-                  document_name: doc.name,
-                  column_id: col.id,
-                  column_name: col.name,
-                },
-              });
-          }
-      });
-
-      await Promise.all(promises);
-
-      // Mark all columns as completed if finished successfully without abort
-      if (!controller.signal.aborted) {
-          setColumns(prev => prev.map(c => colsToProcess.some(target => target.id === c.id) ? { ...c, status: 'completed' } : c));
-
-          logRuntimeEvent({
-            event: 'analysis_completed',
-            stage: 'analysis',
-            runId: analysisRunId,
-            metadata: {
-              model_id: selectedModel,
-              queued_tasks: tasks.length,
-              successful_cells: successCount,
-              failed_cells: failureCount,
-              skipped_existing_cells: skippedCells,
-              duration_ms: Math.round(performance.now() - analysisStartedAt),
-            },
-          });
-      } else {
-          logRuntimeEvent({
-            event: 'analysis_aborted',
-            level: 'warning',
-            stage: 'analysis',
-            runId: analysisRunId,
-            metadata: {
-              queued_tasks: tasks.length,
-              successful_cells: successCount,
-              failed_cells: failureCount,
-              duration_ms: Math.round(performance.now() - analysisStartedAt),
-            },
-          });
-      }
-
+      await refreshProjects();
+      setSelectedProjectId(data.project.id);
+      setTab('documents');
+    } catch (err: any) {
+      setError(err.message || 'Failed to create project');
     } finally {
-      // If we are still the active controller (cleanup)
-      if (abortControllerRef.current === controller) {
-        setIsProcessing(false);
-        abortControllerRef.current = null;
-        
-        // Reset extracting status if stopped early (aborted)
-        setColumns(prev => prev.map(c => c.status === 'extracting' ? { ...c, status: 'idle' } : c));
+      setBusy(false);
+    }
+  };
+
+  const uploadDocuments = async (fileList: FileList | null) => {
+    if (!fileList || !selectedProjectId) return;
+    setBusy(true);
+    setError('');
+    try {
+      const ids: string[] = [];
+      for (const file of Array.from(fileList)) {
+        const result = await api.uploadProjectDocument(selectedProjectId, file);
+        ids.push(result.task_id);
       }
+      setPendingTaskIds((prev) => [...prev, ...ids]);
+      await refreshProjectContext(selectedProjectId, false);
+    } catch (err: any) {
+      setError(err.message || 'Failed to upload documents');
+    } finally {
+      setBusy(false);
     }
   };
 
-  const handleCellClick = (docId: string, colId: string) => {
-    const cell = results[docId]?.[colId];
-    if (cell) {
-      setSelectedCell({ docId, colId });
-      setPreviewDocId(null);
-      setSidebarMode('verify');
-      setIsSidebarExpanded(false); // Reset to narrow "Answer Only" view
-    }
+  const updateDraftField = (idx: number, patch: Partial<TemplateFieldDefinition>) => {
+    setDraftFields((prev) => prev.map((f, i) => (i === idx ? { ...f, ...patch } : f)));
   };
 
-  const handleDocumentClick = (docId: string) => {
-    setSelectedCell(null);
-    setPreviewDocId(docId);
-    setSidebarMode('verify');
-    setIsSidebarExpanded(true); // Document preview should be wide
-  };
-
-  const handleVerifyCell = () => {
-    if (!selectedCell) return;
-    const { docId, colId } = selectedCell;
-    
-    setResults(prev => ({
+  const addDraftField = () => {
+    setDraftFields((prev) => [
       ...prev,
-      [docId]: {
-        ...prev[docId],
-        [colId]: {
-          ...prev[docId][colId]!,
-          status: 'verified'
-        }
+      { key: `field_${prev.length + 1}`, name: `Field ${prev.length + 1}`, type: 'text', prompt: '', required: false },
+    ]);
+  };
+
+  const removeDraftField = (idx: number) => {
+    setDraftFields((prev) => prev.filter((_, i) => i !== idx));
+  };
+
+  const createTemplate = async () => {
+    if (!selectedProjectId || !templateName.trim() || !draftFields.length) return;
+    setBusy(true);
+    setError('');
+    try {
+      const payload = {
+        name: templateName,
+        fields: draftFields,
+        validation_policy: { required_fields: draftFields.filter((f) => f.required).map((f) => f.key) },
+        normalization_policy: {
+          date_format: 'ISO-8601',
+          numeric_policy: 'strip_commas',
+          boolean_policy: 'strict_true_false',
+        },
+      };
+      const data = await api.createTemplate(selectedProjectId, payload);
+      if (data.triggered_extraction_task_id) {
+        setPendingTaskIds((prev) => [...prev, data.triggered_extraction_task_id!]);
       }
-    }));
-  };
-
-  const toggleChat = () => {
-    if (sidebarMode === 'chat') {
-      setSidebarMode('none');
-    } else {
-      setSidebarMode('chat');
-      setSelectedCell(null);
-      setPreviewDocId(null);
-      setIsSidebarExpanded(false); // Chat usually is standard width
+      await refreshProjectContext(selectedProjectId, true);
+      setSelectedTemplateId(data.template.id);
+      setSelectedTemplateVersionId(data.template_version.id);
+      setTab('table');
+    } catch (err: any) {
+      setError(err.message || 'Failed to create template');
+    } finally {
+      setBusy(false);
     }
   };
 
-  // Render Helpers
-  const getSidebarData = () => {
-    // Priority 1: Selected Cell (Inspecting result)
-    if (selectedCell) {
-      return {
-        cell: results[selectedCell.docId]?.[selectedCell.colId] || null,
-        document: documents.find(d => d.id === selectedCell.docId) || null,
-        column: columns.find(c => c.id === selectedCell.colId) || null
-      };
+  const createTemplateVersion = async () => {
+    if (!selectedTemplateId || !selectedProjectId || !draftFields.length) return;
+    setBusy(true);
+    setError('');
+    try {
+      const data = await api.createTemplateVersion(selectedTemplateId, {
+        fields: draftFields,
+        validation_policy: { required_fields: draftFields.filter((f) => f.required).map((f) => f.key) },
+        normalization_policy: {
+          date_format: 'ISO-8601',
+          numeric_policy: 'strip_commas',
+          boolean_policy: 'strict_true_false',
+        },
+      });
+      setPendingTaskIds((prev) => [...prev, data.triggered_extraction_task_id]);
+      setSelectedTemplateVersionId(data.template_version.id);
+      await refreshProjectContext(selectedProjectId, true);
+      setTab('table');
+    } catch (err: any) {
+      setError(err.message || 'Failed to create template version');
+    } finally {
+      setBusy(false);
     }
-    // Priority 2: Previewed Document (Reading mode)
-    if (previewDocId) {
-      return {
-        cell: null,
-        document: documents.find(d => d.id === previewDocId) || null,
-        column: null
-      };
-    }
-    return null;
   };
 
-  const sidebarData = getSidebarData();
-  const currentModel = MODELS.find(m => m.id === selectedModel) || MODELS[0];
-
-  // Calculate Sidebar Width
-  const getSidebarWidthClass = () => {
-      if (sidebarMode === 'none') return 'w-0 translate-x-10 opacity-0 overflow-hidden';
-      
-      // Chat is fixed width
-      if (sidebarMode === 'chat') return 'w-[400px] translate-x-0';
-      
-      // Verify Mode depends on expansion
-      if (isSidebarExpanded) return 'w-[900px] translate-x-0'; // Wide Inspector
-      return 'w-[400px] translate-x-0'; // Narrow Analyst
+  const runExtraction = async () => {
+    if (!selectedProjectId) return;
+    setBusy(true);
+    setError('');
+    try {
+      const data = await api.createExtractionRun(
+        selectedProjectId,
+        selectedTemplateVersionId || undefined,
+        extractionMode,
+        qualityProfile
+      );
+      setPendingTaskIds((prev) => [...prev, data.task_id]);
+    } catch (err: any) {
+      setError(err.message || 'Failed to start extraction run');
+    } finally {
+      setBusy(false);
+    }
   };
+
+  const refreshTable = async () => {
+    if (!selectedProjectId || !selectedTemplateVersionId) return;
+    setBusy(true);
+    setError('');
+    try {
+      const table = await api.getTableView(selectedProjectId, selectedTemplateVersionId, baselineDocumentId || undefined);
+      setTableView(table);
+      if (!baselineDocumentId && table.rows.length) {
+        setBaselineDocumentId(table.rows[0].document_id);
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to load table view');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (tab === 'table' && selectedProjectId && selectedTemplateVersionId) {
+      void refreshTable();
+    }
+  }, [tab, selectedProjectId, selectedTemplateVersionId]);
+
+  useEffect(() => {
+    if (!selectedCell) return;
+    setReviewStatus(selectedCell.cell.review_overlay?.status || 'CONFIRMED');
+    setManualValue(selectedCell.cell.review_overlay?.manual_value || selectedCell.cell.effective_value || '');
+    setReviewer(selectedCell.cell.review_overlay?.reviewer || 'analyst@demo.local');
+    setReviewNotes(selectedCell.cell.review_overlay?.notes || '');
+  }, [selectedCell?.row.document_version_id, selectedCell?.cell.field_key]);
+
+  const saveReview = async () => {
+    if (!selectedProjectId || !selectedTemplateVersionId || !selectedCell) return;
+    setBusy(true);
+    setError('');
+    try {
+      await api.upsertReviewDecision(selectedProjectId, {
+        document_version_id: selectedCell.row.document_version_id,
+        template_version_id: selectedTemplateVersionId,
+        field_key: selectedCell.cell.field_key,
+        status: reviewStatus,
+        manual_value: reviewStatus === 'MANUAL_UPDATED' ? manualValue : null,
+        reviewer,
+        notes: reviewNotes,
+      });
+      await refreshTable();
+    } catch (err: any) {
+      setError(err.message || 'Failed to save review decision');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const addAnnotation = async () => {
+    if (!selectedProjectId || !selectedTemplateVersionId || !selectedCell || !annotationBody.trim()) return;
+    setBusy(true);
+    setError('');
+    try {
+      await api.createAnnotation(selectedProjectId, {
+        document_version_id: selectedCell.row.document_version_id,
+        template_version_id: selectedTemplateVersionId,
+        field_key: selectedCell.cell.field_key,
+        body: annotationBody,
+        author: reviewer,
+        approved: false,
+      });
+      setAnnotationBody('');
+      const data = await api.listAnnotations(selectedProjectId, selectedTemplateVersionId);
+      setAnnotations(data.annotations || []);
+    } catch (err: any) {
+      setError(err.message || 'Failed to add annotation');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const createGroundTruth = async () => {
+    if (!selectedProjectId) return;
+    setBusy(true);
+    setError('');
+    try {
+      const labels = JSON.parse(groundTruthInput || '[]');
+      const data = await api.createGroundTruthSet(selectedProjectId, {
+        name: groundTruthName,
+        labels,
+        format: 'json',
+      });
+      setGroundTruthSetId(data.ground_truth_set.id);
+    } catch (err: any) {
+      setError(err.message || 'Failed to create ground truth set (check JSON format)');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const runEvaluation = async () => {
+    if (!selectedProjectId || !groundTruthSetId || !tableView?.extraction_run_id) return;
+    setBusy(true);
+    setError('');
+    try {
+      const data = await api.createEvaluationRun(selectedProjectId, {
+        ground_truth_set_id: groundTruthSetId,
+        extraction_run_id: tableView.extraction_run_id,
+      });
+      setEvaluationRunId(data.evaluation_run_id);
+      setPendingTaskIds((prev) => [...prev, data.task_id]);
+    } catch (err: any) {
+      setError(err.message || 'Failed to start evaluation run');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const selectedViewerDocument = selectedCell ? toViewerDocument(selectedCell.row) : null;
+  const selectedViewerCell = selectedCell ? toLegacyCell(selectedCell.cell) : null;
 
   return (
-    <div className="flex h-screen bg-[#F5F4F0] text-black font-sans">
-      {/* Hidden File Input */}
-      <input 
-        type="file" 
-        ref={fileInputRef}
-        onChange={handleFileUpload}
-        multiple
-        className="hidden"
-        accept=".pdf,.htm,.html,.txt,.md,.json,.docx"
-      />
+    <div className="h-screen w-screen bg-[#F5F4F0] text-[#1C1C1C] flex overflow-hidden font-sans">
+      <aside className="w-[320px] border-r border-[#E5E7EB] bg-white flex flex-col">
+        <div className="p-5 border-b border-[#E5E7EB]">
+          <h1 className="text-xl font-serif font-bold">Legal Tabular Review</h1>
+          <p className="text-xs text-[#8A8470] mt-1">Project lifecycle, extraction runs, review audit, evaluation.</p>
+        </div>
 
-      {/* Main Content Area */}
-      <div className="flex-1 flex flex-col overflow-hidden">
-        {/* Header */}
-        <header className="relative z-50 bg-[#F5F4F0] h-16 flex items-center justify-between px-6">
-          <div className="flex items-center gap-5 min-w-0">
-            <h1 className="text-xl font-bold text-black tracking-tight whitespace-nowrap font-serif">Makebell </h1>
-            <div className="h-5 w-px bg-[#DDD9D0] flex-shrink-0"></div>
-            {isEditingProjectName ? (
-              <input
-                type="text"
-                value={projectName}
-                onChange={(e) => setProjectName(e.target.value)}
-                onBlur={() => setIsEditingProjectName(false)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') setIsEditingProjectName(false);
-                }}
-                className="text-sm font-medium text-black border-b border-black outline-none bg-transparent min-w-[150px]"
-                autoFocus
-              />
-            ) : (
-              <p 
-                className="text-sm text-[#1C1C1C] font-medium cursor-text hover:text-black px-2 py-1 rounded-md hover:bg-[#E5E7EB] transition-all select-none truncate max-w-[200px] sm:max-w-[300px]"
-                onDoubleClick={() => setIsEditingProjectName(true)}
-                title="Double click to rename"
-              >
-                {projectName}
-              </p>
-            )}
-          </div>
-          <div className="flex items-center gap-2 flex-shrink-0">
-             {/* Chat Button - Borderless text+icon */}
-             <button 
-                onClick={toggleChat}
-                className={`flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-pill transition-all active:scale-[0.97] ${
-                  sidebarMode === 'chat' 
-                  ? 'bg-[#EFF1F5] text-[#4A5A7B]' 
-                  : 'text-[#333333] hover:bg-[#E5E7EB]'
+        <div className="p-4 border-b border-[#E5E7EB] space-y-2">
+          <input
+            value={newProjectName}
+            onChange={(e) => setNewProjectName(e.target.value)}
+            placeholder="Project name"
+            className="w-full border border-[#E5E7EB] rounded-lg px-3 py-2 text-sm"
+          />
+          <textarea
+            value={newProjectDescription}
+            onChange={(e) => setNewProjectDescription(e.target.value)}
+            placeholder="Project description"
+            className="w-full border border-[#E5E7EB] rounded-lg px-3 py-2 text-sm min-h-[70px]"
+          />
+          <button
+            onClick={createProject}
+            disabled={busy}
+            className="w-full bg-[#1C1C1C] text-white rounded-pill px-4 py-2 text-sm font-semibold disabled:opacity-50"
+          >
+            Create Project
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-auto p-3">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#8A8470] px-2 pb-2">Projects</div>
+          <div className="space-y-2">
+            {projects.map((project) => (
+              <button
+                key={project.id}
+                onClick={() => setSelectedProjectId(project.id)}
+                className={`w-full text-left rounded-lg px-3 py-3 border transition-colors ${
+                  selectedProjectId === project.id
+                    ? 'bg-[#EFF1F5] border-[#B8BFCE]'
+                    : 'bg-white border-[#E5E7EB] hover:bg-[#FAFAF7]'
                 }`}
-                title="AI Analyst"
-             >
-                <MessageSquare className="w-3.5 h-3.5" />
-                Chat
-             </button>
+              >
+                <div className="text-sm font-semibold">{project.name}</div>
+                <div className="text-[11px] text-[#8A8470] mt-0.5">{project.status}</div>
+              </button>
+            ))}
+          </div>
+        </div>
 
-             {/* Workflows Dropdown - Consolidates Save, Load, Export, Clear, Wrap, Load Sample */}
-             <div className="relative">
-               <button 
-                  onClick={() => setIsWorkflowsMenuOpen(!isWorkflowsMenuOpen)}
-                  className="flex items-center gap-2 px-3 py-2 text-xs font-semibold text-[#333333] hover:bg-[#E5E7EB] rounded-pill transition-all active:scale-[0.97]"
-               >
-                  <MoreHorizontal className="w-3.5 h-3.5" />
-                  Workflows
-               </button>
-               {isWorkflowsMenuOpen && (
-                 <>
-                   <div className="fixed inset-0 z-40" onClick={() => setIsWorkflowsMenuOpen(false)}></div>
-                   <div className="absolute right-0 top-full mt-2 w-52 bg-white rounded-xl shadow-elevated border border-[#E5E7EB] py-1.5 z-50">
-                     <button onClick={() => { handleSaveProject(); setIsWorkflowsMenuOpen(false); }} disabled={documents.length === 0 && columns.length === 0} className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-[#333333] hover:bg-[#F5F4F0] transition-colors disabled:opacity-40">
-                       <Save className="w-4 h-4 text-[#8A8470]" /> Save Project
-                     </button>
-                     <button onClick={() => { handleLoadProject(); setIsWorkflowsMenuOpen(false); }} className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-[#333333] hover:bg-[#F5F4F0] transition-colors">
-                       <FolderOpen className="w-4 h-4 text-[#8A8470]" /> Load Project
-                     </button>
-                     <button onClick={() => { handleExportCSV(); setIsWorkflowsMenuOpen(false); }} className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-[#333333] hover:bg-[#F5F4F0] transition-colors">
-                       <Download className="w-4 h-4 text-[#8A8470]" /> Export CSV
-                     </button>
-                     <div className="h-px bg-[#E5E7EB] my-1.5 mx-3"></div>
-                     <button onClick={() => { handleLoadSample(); setIsWorkflowsMenuOpen(false); }} className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-[#333333] hover:bg-[#F5F4F0] transition-colors">
-                       <LayoutTemplate className="w-4 h-4 text-[#8A8470]" /> Load Sample
-                     </button>
-                     <button onClick={() => { setIsTextWrapEnabled(!isTextWrapEnabled); setIsWorkflowsMenuOpen(false); }} className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-[#333333] hover:bg-[#F5F4F0] transition-colors">
-                       <WrapText className="w-4 h-4 text-[#8A8470]" /> {isTextWrapEnabled ? 'Unwrap Text' : 'Wrap Text'}
-                     </button>
-                     <div className="h-px bg-[#E5E7EB] my-1.5 mx-3"></div>
-                     <button onClick={() => { handleClearAll(); setIsWorkflowsMenuOpen(false); }} className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-red-600 hover:bg-red-50 transition-colors">
-                       <Trash2 className="w-4 h-4" /> Clear Project
-                     </button>
-                   </div>
-                 </>
-               )}
-             </div>
-
-             {/* Add Document Button - Borderless */}
-             <button 
-                onClick={() => !isConverting && fileInputRef.current?.click()}
-                disabled={isConverting}
-                className={`flex items-center gap-2 px-3 py-2 text-xs font-semibold text-[#333333] hover:bg-[#E5E7EB] rounded-pill transition-all active:scale-[0.97] ${isConverting ? 'opacity-70 cursor-wait' : ''}`}
-                title="Add Documents"
-             >
-                {isConverting ? (
-                    <>
-                        <Loader2 className="w-3.5 h-3.5 animate-spin text-[#4A5A7B]" />
-                        <span>Converting...</span>
-                    </>
-                ) : (
-                    <>
-                        <FilePlus className="w-3.5 h-3.5" />
-                        <span>Add Document</span>
-                    </>
-                )}
-             </button>
-
-             <div className="h-5 w-px bg-[#DDD9D0] mx-1"></div>
-
-             {/* Model Selector - Minimal sand pill */}
-             <div className="relative">
-                <button 
-                onClick={() => !isProcessing && setIsModelMenuOpen(!isModelMenuOpen)}
-                disabled={isProcessing}
-                className={`flex items-center gap-2 px-3 py-2 bg-[#E5E7EB] text-[#333333] rounded-pill border border-[#DDD9D0] transition-all ${!isProcessing ? 'hover:bg-[#DDD9D0] active:scale-[0.97]' : 'opacity-60 cursor-not-allowed'}`}
-                >
-                  <div className="flex items-center gap-2">
-                    <currentModel.icon className="w-3.5 h-3.5 text-[#6B6555]" />
-                    <span className="text-xs font-semibold">{currentModel.name}</span>
-                  </div>
-                  <ChevronDown className="w-3 h-3 opacity-50" />
-                </button>
-                
-                {isModelMenuOpen && (
-                  <>
-                  <div className="fixed inset-0 z-40" onClick={() => setIsModelMenuOpen(false)}></div>
-                  <div className="absolute right-0 top-full mt-2 w-56 bg-white rounded-xl shadow-elevated border border-[#E5E7EB] p-1.5 z-50">
-                    {MODELS.map(model => (
-                      <button
-                        key={model.id}
-                        onClick={() => {
-                          setSelectedModel(model.id);
-                          setIsModelMenuOpen(false);
-                        }}
-                        className={`w-full text-left px-3 py-2.5 rounded-lg flex items-center gap-3 transition-colors ${
-                          selectedModel === model.id ? 'bg-[#F5F4F0] text-[#1C1C1C]' : 'hover:bg-[#FAFAF7] text-[#333333]'
-                        }`}
-                      >
-                        <div className={`p-1.5 rounded-md ${selectedModel === model.id ? 'bg-white shadow-sm border border-[#E5E7EB]' : 'bg-[#F5F4F0]'}`}>
-                          <model.icon className="w-4 h-4 text-[#6B6555]" />
-                        </div>
-                        <div>
-                          <div className="text-xs font-bold">{model.name}</div>
-                          <div className="text-[10px] text-[#8A8470]">{model.description}</div>
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                  </>
-                )}
+        <div className="border-t border-[#E5E7EB] p-3 text-xs text-[#8A8470]">
+          <div>Tasks In Flight: {pendingTaskIds.length}</div>
+          {pendingTaskIds.slice(0, 4).map((id) => {
+            const task = tasks[id];
+            return (
+              <div key={id} className="truncate">
+                {task?.task_type || 'TASK'} · {task?.status || 'QUEUED'}
               </div>
+            );
+          })}
+        </div>
+      </aside>
 
-             {/* Run / Stop Button - Black pill CTA with sage hover */}
-             {isProcessing ? (
-                <button 
-                  onClick={handleStopExtraction}
-                  className="flex items-center gap-2 px-5 py-2 bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 text-xs font-semibold rounded-pill transition-all active:scale-[0.97]"
-                >
-                  <Square className="w-3.5 h-3.5 fill-current" />
-                  Stop
-                </button>
-             ) : selectedDocIds.size > 0 ? (
-                <button 
-                  onClick={handleRerunSelected}
-                  disabled={columns.length === 0}
-                  className="flex items-center gap-2 px-5 py-2 bg-[#1C1C1C] hover:bg-[#333333] text-white text-xs font-bold rounded-pill transition-all active:scale-[0.97] shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
-                  title="Re-run analysis on selected documents"
-                >
-                  <RefreshCw className="w-3.5 h-3.5" />
-                  Re-run ({selectedDocIds.size})
-                </button>
-             ) : (
-                <button 
-                  onClick={handleRunAnalysis}
-                  disabled={documents.length === 0 || columns.length === 0}
-                  className="flex items-center gap-2 px-5 py-2 bg-[#1C1C1C] hover:bg-[#333333] text-white text-xs font-bold rounded-pill transition-all active:scale-[0.97] shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <div className="w-1.5 h-1.5 bg-[#D8DCE5] rounded-full"></div>
-                  Run Analysis
-                </button>
-             )}
+      <main className="flex-1 flex flex-col min-w-0">
+        <header className="h-16 border-b border-[#E5E7EB] bg-white flex items-center justify-between px-5">
+          <div>
+            <div className="text-sm font-semibold">{selectedProject?.name || 'No project selected'}</div>
+            <div className="text-xs text-[#8A8470]">{selectedProject?.description || 'Create or select a project to begin.'}</div>
+          </div>
+          <div className="flex items-center gap-2">
+            {(['documents', 'templates', 'table', 'evaluation', 'annotations'] as WorkspaceTab[]).map((item) => (
+              <button
+                key={item}
+                onClick={() => setTab(item)}
+                className={`px-3 py-1.5 rounded-pill text-xs font-semibold ${
+                  tab === item ? 'bg-[#1C1C1C] text-white' : 'bg-[#F5F4F0] text-[#6B6555]'
+                }`}
+              >
+                {item}
+              </button>
+            ))}
           </div>
         </header>
 
-        {/* Workspace */}
-        <main className="flex-1 flex overflow-hidden relative p-4 pt-2">
-          {/* Conversion Overlay */}
-          {isConverting && (
-            <AgenticLoadingOverlay 
-              processingComplete={processingProgress?.current === processingProgress?.total}
-              currentFile={processingProgress?.current || 0}
-              totalFiles={processingProgress?.total || 0}
-            />
-          )}
-
-          <div className="flex-1 flex flex-col min-w-0 bg-white rounded-xl shadow-card overflow-hidden">
-             <DataGrid 
-                documents={documents} 
-                columns={columns} 
-                results={results}
-                onAddColumn={(rect) => setAddColumnAnchor(rect)}
-                onEditColumn={handleEditColumn}
-                onColumnResize={handleColumnResize}
-                onCellClick={handleCellClick}
-                onDocClick={handleDocumentClick}
-                onRemoveDoc={handleRemoveDoc}
-                selectedCell={selectedCell}
-                isTextWrapEnabled={isTextWrapEnabled}
-                onDropFiles={(files) => processUploadedFiles(files)}
-                selectedDocIds={selectedDocIds}
-                onToggleDocSelection={handleToggleDocSelection}
-                onToggleAllDocSelection={handleToggleAllDocSelection}
-             />
+        {error && (
+          <div className="mx-5 mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {error}
           </div>
+        )}
 
-          {/* Add/Edit Column Menu */}
-          {addColumnAnchor && (
-            <AddColumnMenu 
-              triggerRect={addColumnAnchor}
-              onClose={handleCloseMenu}
-              onSave={handleSaveColumn}
-              onDelete={handleDeleteColumn}
-              modelId={selectedModel}
-              initialData={editingColumnId ? columns.find(c => c.id === editingColumnId) : undefined}
-              onOpenLibrary={handleOpenLibrary}
-            />
-          )}
-
-          {/* Column Library Modal */}
-          <ColumnLibrary
-            isOpen={isLibraryOpen}
-            onClose={() => setIsLibraryOpen(false)}
-            onSelectTemplate={handleSelectTemplate}
-          />
-
-          {/* Right Sidebar Container (Animated Width) */}
-          <div 
-            className={`transition-all duration-300 ease-in-out bg-white shadow-card z-30 relative ml-3 rounded-xl overflow-hidden ${getSidebarWidthClass()}`}
-          >
-            <div className="w-full h-full absolute right-0 top-0 flex flex-col">
-                {sidebarMode === 'verify' && sidebarData && (
-                    <VerificationSidebar 
-                        cell={sidebarData.cell}
-                        document={sidebarData.document}
-                        column={sidebarData.column}
-                        onClose={() => { setSidebarMode('none'); setSelectedCell(null); setPreviewDocId(null); }}
-                        onVerify={handleVerifyCell}
-                        isExpanded={isSidebarExpanded}
-                        onExpand={setIsSidebarExpanded}
-                    />
-                )}
-                {sidebarMode === 'chat' && (
-                    <ChatInterface 
-                        documents={documents}
-                        columns={columns}
-                        results={results}
-                        onClose={() => setSidebarMode('none')}
-                        modelId={selectedModel}
-                    />
-                )}
+        <div className="flex-1 min-h-0 overflow-hidden p-5">
+          {!selectedProjectId ? (
+            <div className="h-full flex items-center justify-center text-[#8A8470] text-sm">
+              Select a project to continue.
             </div>
-          </div>
-        </main>
-      </div>
+          ) : (
+            <div className="h-full overflow-auto">
+              {tab === 'documents' && (
+                <section className="space-y-4">
+                  <div className="bg-white border border-[#E5E7EB] rounded-xl p-4">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <h2 className="font-semibold">Document Ingestion</h2>
+                        <p className="text-xs text-[#8A8470]">Upload PDF, DOCX, HTML, TXT. Each upload creates a parse task and document version.</p>
+                      </div>
+                      <label className="px-4 py-2 rounded-pill bg-[#1C1C1C] text-white text-xs font-semibold cursor-pointer">
+                        Upload Files
+                        <input
+                          type="file"
+                          className="hidden"
+                          multiple
+                          accept=".pdf,.doc,.docx,.html,.htm,.txt,.md"
+                          onChange={(e) => uploadDocuments(e.target.files)}
+                        />
+                      </label>
+                    </div>
+                  </div>
+
+                  <div className="bg-white border border-[#E5E7EB] rounded-xl overflow-hidden">
+                    <table className="w-full text-sm">
+                      <thead className="bg-[#FAFAF7]">
+                        <tr>
+                          <th className="text-left px-4 py-3 text-xs uppercase tracking-[0.1em] text-[#8A8470]">Document</th>
+                          <th className="text-left px-4 py-3 text-xs uppercase tracking-[0.1em] text-[#8A8470]">Latest Version</th>
+                          <th className="text-left px-4 py-3 text-xs uppercase tracking-[0.1em] text-[#8A8470]">Parse Status</th>
+                          <th className="text-left px-4 py-3 text-xs uppercase tracking-[0.1em] text-[#8A8470]">MIME</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {documents.map((doc) => (
+                          <tr key={doc.id} className="border-t border-[#F0F0EC]">
+                            <td className="px-4 py-3">{doc.filename}</td>
+                            <td className="px-4 py-3">{doc.latest_version?.version_no || '-'}</td>
+                            <td className="px-4 py-3">{doc.latest_version?.parse_status || 'PENDING'}</td>
+                            <td className="px-4 py-3">{doc.source_mime_type || '-'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              )}
+
+              {tab === 'templates' && (
+                <section className="space-y-4">
+                  <div className="bg-white border border-[#E5E7EB] rounded-xl p-4 space-y-4">
+                    <div>
+                      <h2 className="font-semibold">Field Template Management</h2>
+                      <p className="text-xs text-[#8A8470]">Versioned schema with normalization and validation policies.</p>
+                    </div>
+                    <input
+                      value={templateName}
+                      onChange={(e) => setTemplateName(e.target.value)}
+                      className="w-full border border-[#E5E7EB] rounded-lg px-3 py-2 text-sm"
+                      placeholder="Template name"
+                    />
+
+                    <div className="space-y-3">
+                      {draftFields.map((field, idx) => (
+                        <div key={`${field.key}_${idx}`} className="grid grid-cols-12 gap-2 items-center">
+                          <input
+                            value={field.key}
+                            onChange={(e) => updateDraftField(idx, { key: e.target.value })}
+                            className="col-span-2 border border-[#E5E7EB] rounded px-2 py-1 text-xs"
+                            placeholder="key"
+                          />
+                          <input
+                            value={field.name}
+                            onChange={(e) => updateDraftField(idx, { name: e.target.value })}
+                            className="col-span-3 border border-[#E5E7EB] rounded px-2 py-1 text-xs"
+                            placeholder="name"
+                          />
+                          <select
+                            value={field.type}
+                            onChange={(e) => updateDraftField(idx, { type: e.target.value })}
+                            className="col-span-2 border border-[#E5E7EB] rounded px-2 py-1 text-xs"
+                          >
+                            <option value="text">text</option>
+                            <option value="date">date</option>
+                            <option value="number">number</option>
+                            <option value="boolean">boolean</option>
+                            <option value="list">list</option>
+                          </select>
+                          <input
+                            value={field.prompt}
+                            onChange={(e) => updateDraftField(idx, { prompt: e.target.value })}
+                            className="col-span-4 border border-[#E5E7EB] rounded px-2 py-1 text-xs"
+                            placeholder="prompt"
+                          />
+                          <button
+                            onClick={() => removeDraftField(idx)}
+                            className="col-span-1 text-xs rounded bg-red-50 text-red-700 px-2 py-1"
+                          >
+                            Del
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="flex gap-2">
+                      <button onClick={addDraftField} className="px-3 py-1.5 rounded-pill bg-[#F5F4F0] text-xs font-semibold">
+                        Add Field
+                      </button>
+                      <button onClick={createTemplate} disabled={busy} className="px-3 py-1.5 rounded-pill bg-[#1C1C1C] text-white text-xs font-semibold disabled:opacity-50">
+                        Create Template
+                      </button>
+                      <button onClick={createTemplateVersion} disabled={busy || !selectedTemplateId} className="px-3 py-1.5 rounded-pill bg-[#4A5A7B] text-white text-xs font-semibold disabled:opacity-50">
+                        Create New Version
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="bg-white border border-[#E5E7EB] rounded-xl p-4">
+                    <h3 className="font-semibold mb-2">Existing Templates</h3>
+                    <div className="space-y-2">
+                      {templates.map((tpl) => (
+                        <div key={tpl.id} className="border border-[#E5E7EB] rounded-lg p-3">
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <div className="text-sm font-semibold">{tpl.name}</div>
+                              <div className="text-xs text-[#8A8470]">Active Version: {tpl.active_version_id || '-'}</div>
+                            </div>
+                            <button
+                              onClick={() => {
+                                setSelectedTemplateId(tpl.id);
+                                setSelectedTemplateVersionId(tpl.active_version_id || tpl.versions?.[0]?.id || null);
+                              }}
+                              className="px-3 py-1 rounded-pill bg-[#EFF1F5] text-xs font-semibold"
+                            >
+                              Select
+                            </button>
+                          </div>
+                          <div className="mt-2 text-xs text-[#6B6555]">
+                            Versions: {(tpl.versions || []).map((v: any) => `v${v.version_no}`).join(', ')}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </section>
+              )}
+
+              {tab === 'table' && (
+                <section className="h-full flex gap-4">
+                  <div className="flex-1 min-w-0 flex flex-col bg-white border border-[#E5E7EB] rounded-xl overflow-hidden">
+                    <div className="p-3 border-b border-[#E5E7EB] flex items-center gap-2 justify-between">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <button onClick={runExtraction} className="px-3 py-1.5 rounded-pill bg-[#1C1C1C] text-white text-xs font-semibold">
+                          Run Extraction
+                        </button>
+                        <button onClick={refreshTable} className="px-3 py-1.5 rounded-pill bg-[#EFF1F5] text-xs font-semibold">
+                          Refresh Table
+                        </button>
+                        <label className="text-xs text-[#8A8470]">
+                          Mode
+                          <select
+                            value={extractionMode}
+                            onChange={(e) => setExtractionMode(e.target.value as ExtractionMode)}
+                            className="ml-1 border border-[#E5E7EB] rounded px-2 py-1 text-xs text-[#1C1C1C]"
+                          >
+                            {EXTRACTION_MODES.map((mode) => (
+                              <option key={mode} value={mode}>{mode}</option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className="text-xs text-[#8A8470]">
+                          Quality
+                          <select
+                            value={qualityProfile}
+                            onChange={(e) => setQualityProfile(e.target.value as QualityProfile)}
+                            className="ml-1 border border-[#E5E7EB] rounded px-2 py-1 text-xs text-[#1C1C1C]"
+                          >
+                            {QUALITY_PROFILES.map((profile) => (
+                              <option key={profile} value={profile}>{profile}</option>
+                            ))}
+                          </select>
+                        </label>
+                        <button
+                          onClick={() => setShowUnresolvedOnly((prev) => !prev)}
+                          className={`px-2 py-1 rounded text-[11px] font-semibold ${showUnresolvedOnly ? 'bg-[#FBE7D8] text-[#8A3B00]' : 'bg-[#F5F4F0] text-[#6B6555]'}`}
+                        >
+                          Unresolved
+                        </button>
+                        <button
+                          onClick={() => setShowLowConfidenceOnly((prev) => !prev)}
+                          className={`px-2 py-1 rounded text-[11px] font-semibold ${showLowConfidenceOnly ? 'bg-[#FFF4D6] text-[#7A5A00]' : 'bg-[#F5F4F0] text-[#6B6555]'}`}
+                        >
+                          Low Confidence
+                        </button>
+                      </div>
+                      <div className="flex items-center gap-2 text-xs">
+                        <span className="text-[#8A8470]">Baseline Doc</span>
+                        <select
+                          value={baselineDocumentId}
+                          onChange={(e) => setBaselineDocumentId(e.target.value)}
+                          className="border border-[#E5E7EB] rounded px-2 py-1"
+                        >
+                          <option value="">Auto</option>
+                          {(tableView?.rows || []).map((row) => (
+                            <option key={row.document_id} value={row.document_id}>{row.filename}</option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="flex-1 overflow-auto">
+                      <table className="w-full text-sm border-collapse">
+                        <thead className="bg-[#FAFAF7] sticky top-0 z-10">
+                          <tr>
+                            <th className="text-left px-3 py-3 text-xs uppercase tracking-[0.1em] text-[#8A8470] sticky left-0 bg-[#FAFAF7]">Document</th>
+                            {(tableView?.columns || []).map((col) => (
+                              <th key={col.key} className="text-left px-3 py-3 text-xs uppercase tracking-[0.1em] text-[#8A8470] min-w-[220px]">{col.name}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {displayRows.map((row) => (
+                            <tr key={row.document_version_id} className="border-t border-[#F0F0EC]">
+                              <td className="px-3 py-3 sticky left-0 bg-white text-xs font-semibold">{row.filename}</td>
+                              {(tableView?.columns || []).map((col) => {
+                                const cell = row.cells[col.key];
+                                const selected = selectedCell?.row.document_version_id === row.document_version_id && selectedCell?.cell.field_key === col.key;
+                                return (
+                                  <td
+                                    key={`${row.document_version_id}_${col.key}`}
+                                    className={`px-3 py-3 align-top cursor-pointer ${selected ? 'bg-[#EFF1F5]' : 'hover:bg-[#FAFAF7]'}`}
+                                    onClick={() => {
+                                      setSelectedRowVersionId(row.document_version_id);
+                                      setSelectedFieldKey(col.key);
+                                    }}
+                                  >
+                                    <div className="text-xs text-[#1C1C1C] whitespace-pre-wrap break-words">
+                                      {cell?.effective_value || '-'}
+                                    </div>
+                                    <div className="mt-1 flex gap-1 text-[10px]">
+                                      {cell?.review_overlay?.status && (
+                                        <span className="px-1.5 py-0.5 rounded bg-[#F5F4F0] text-[#6B6555]">{cell.review_overlay.status}</span>
+                                      )}
+                                      {cell?.ai_result?.extraction_method && (
+                                        <span className="px-1.5 py-0.5 rounded bg-[#E8EEF8] text-[#304A7A]">{cell.ai_result.extraction_method}</span>
+                                      )}
+                                      {cell?.ai_result?.verifier_status && cell.ai_result.verifier_status !== 'SKIPPED' && (
+                                        <span
+                                          className={`px-1.5 py-0.5 rounded ${
+                                            cell.ai_result.verifier_status === 'PASS'
+                                              ? 'bg-[#E4F8EC] text-[#1C6A3F]'
+                                              : cell.ai_result.verifier_status === 'PARTIAL'
+                                                ? 'bg-[#FFF4D6] text-[#7A5A00]'
+                                                : 'bg-[#FBE4E6] text-[#8D1D2C]'
+                                          }`}
+                                        >
+                                          {cell.ai_result.verifier_status}
+                                        </span>
+                                      )}
+                                      {(cell?.ai_result?.confidence_score || 0) < 0.55 && (
+                                        <span className="px-1.5 py-0.5 rounded bg-[#FFF4D6] text-[#7A5A00]">LOW CONF</span>
+                                      )}
+                                      {cell?.is_diff && (
+                                        <span className="px-1.5 py-0.5 rounded bg-[#FFF4D6] text-[#7A5A00]">DIFF</span>
+                                      )}
+                                    </div>
+                                  </td>
+                                );
+                              })}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  <div className="w-[440px] bg-white border border-[#E5E7EB] rounded-xl overflow-hidden flex flex-col">
+                    <div className="p-3 border-b border-[#E5E7EB]">
+                      <h3 className="font-semibold text-sm">Review & Audit Overlay</h3>
+                      <p className="text-xs text-[#8A8470]">Required states: CONFIRMED, REJECTED, MANUAL_UPDATED, MISSING_DATA</p>
+                    </div>
+
+                    {selectedCell ? (
+                      <div className="flex-1 overflow-auto p-3 space-y-3">
+                        <div className="text-xs text-[#8A8470]">
+                          <div><strong>Document:</strong> {selectedCell.row.filename}</div>
+                          <div><strong>Field:</strong> {selectedCell.cell.field_key}</div>
+                        </div>
+
+                        <div className="border border-[#E5E7EB] rounded-lg p-2 bg-[#FAFAF7]">
+                          <div className="text-[11px] uppercase tracking-[0.1em] text-[#8A8470] mb-1">AI Result</div>
+                          <div className="text-sm">{selectedCell.cell.ai_result?.value || '-'}</div>
+                          <div className="text-xs text-[#6B6555] mt-1">{selectedCell.cell.ai_result?.evidence_summary || 'No evidence summary.'}</div>
+                          <div className="mt-2 flex flex-wrap gap-1 text-[10px]">
+                            {selectedCell.cell.ai_result?.extraction_method && (
+                              <span className="px-1.5 py-0.5 rounded bg-[#E8EEF8] text-[#304A7A]">
+                                {selectedCell.cell.ai_result.extraction_method}
+                              </span>
+                            )}
+                            {selectedCell.cell.ai_result?.verifier_status && selectedCell.cell.ai_result.verifier_status !== 'SKIPPED' && (
+                              <span className="px-1.5 py-0.5 rounded bg-[#F5F4F0] text-[#6B6555]">
+                                verifier: {selectedCell.cell.ai_result.verifier_status}
+                              </span>
+                            )}
+                            <span className="px-1.5 py-0.5 rounded bg-[#F5F4F0] text-[#6B6555]">
+                              conf: {(selectedCell.cell.ai_result?.confidence_score || 0).toFixed(3)}
+                            </span>
+                          </div>
+                          {selectedCell.cell.ai_result?.uncertainty_reason && (
+                            <div className="text-[11px] text-[#8A3B00] mt-2">
+                              {selectedCell.cell.ai_result.uncertainty_reason}
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="grid grid-cols-1 gap-2">
+                          <label className="text-xs">
+                            <span className="block text-[#8A8470] mb-1">Review Status</span>
+                            <select
+                              value={reviewStatus}
+                              onChange={(e) => setReviewStatus(e.target.value as ReviewStatus)}
+                              className="w-full border border-[#E5E7EB] rounded px-2 py-1 text-sm"
+                            >
+                              {REVIEW_STATUSES.map((status) => (
+                                <option key={status} value={status}>{status}</option>
+                              ))}
+                            </select>
+                          </label>
+
+                          <label className="text-xs">
+                            <span className="block text-[#8A8470] mb-1">Manual Value</span>
+                            <textarea
+                              value={manualValue}
+                              onChange={(e) => setManualValue(e.target.value)}
+                              className="w-full border border-[#E5E7EB] rounded px-2 py-1 text-sm min-h-[80px]"
+                            />
+                          </label>
+
+                          <label className="text-xs">
+                            <span className="block text-[#8A8470] mb-1">Reviewer</span>
+                            <input
+                              value={reviewer}
+                              onChange={(e) => setReviewer(e.target.value)}
+                              className="w-full border border-[#E5E7EB] rounded px-2 py-1 text-sm"
+                            />
+                          </label>
+
+                          <label className="text-xs">
+                            <span className="block text-[#8A8470] mb-1">Notes</span>
+                            <textarea
+                              value={reviewNotes}
+                              onChange={(e) => setReviewNotes(e.target.value)}
+                              className="w-full border border-[#E5E7EB] rounded px-2 py-1 text-sm min-h-[70px]"
+                            />
+                          </label>
+                        </div>
+
+                        <button onClick={saveReview} className="w-full px-3 py-2 rounded-pill bg-[#1C1C1C] text-white text-xs font-semibold">
+                          Save Review Decision
+                        </button>
+
+                        <div className="border-t border-[#E5E7EB] pt-3">
+                          <div className="text-xs font-semibold mb-1">Annotation</div>
+                          <textarea
+                            value={annotationBody}
+                            onChange={(e) => setAnnotationBody(e.target.value)}
+                            className="w-full border border-[#E5E7EB] rounded px-2 py-1 text-sm min-h-[70px]"
+                            placeholder="Comment tied to this field/document"
+                          />
+                          <button onClick={addAnnotation} className="mt-2 w-full px-3 py-2 rounded-pill bg-[#4A5A7B] text-white text-xs font-semibold">
+                            Add Annotation
+                          </button>
+                        </div>
+
+                        {selectedViewerDocument && (
+                          <div className="border-t border-[#E5E7EB] pt-3">
+                            <div className="text-xs font-semibold mb-2">Citation Viewer</div>
+                            <div className="h-[360px] border border-[#E5E7EB] rounded overflow-hidden bg-[#F5F4F0]">
+                              <DocumentViewer document={selectedViewerDocument} cell={selectedViewerCell} />
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="flex-1 flex items-center justify-center text-xs text-[#8A8470]">
+                        Select a table cell to review.
+                      </div>
+                    )}
+                  </div>
+                </section>
+              )}
+
+              {tab === 'evaluation' && (
+                <section className="space-y-4">
+                  <div className="bg-white border border-[#E5E7EB] rounded-xl p-4 space-y-3">
+                    <h2 className="font-semibold">Quality Evaluation</h2>
+                    <p className="text-xs text-[#8A8470]">Compare AI extraction output against human-labeled references.</p>
+
+                    <input
+                      value={groundTruthName}
+                      onChange={(e) => setGroundTruthName(e.target.value)}
+                      className="w-full border border-[#E5E7EB] rounded px-3 py-2 text-sm"
+                      placeholder="Ground truth set name"
+                    />
+                    <textarea
+                      value={groundTruthInput}
+                      onChange={(e) => setGroundTruthInput(e.target.value)}
+                      className="w-full border border-[#E5E7EB] rounded px-3 py-2 text-sm min-h-[180px] font-mono"
+                      placeholder='[{"document_version_id":"dv_x","field_key":"effective_date","expected_value":"2025-01-01"}]'
+                    />
+
+                    <div className="flex gap-2">
+                      <button onClick={createGroundTruth} className="px-3 py-2 rounded-pill bg-[#4A5A7B] text-white text-xs font-semibold">
+                        Save Ground Truth
+                      </button>
+                      <button
+                        onClick={runEvaluation}
+                        disabled={!groundTruthSetId || !tableView?.extraction_run_id}
+                        className="px-3 py-2 rounded-pill bg-[#1C1C1C] text-white text-xs font-semibold disabled:opacity-50"
+                      >
+                        Run Evaluation
+                      </button>
+                    </div>
+
+                    <div className="text-xs text-[#6B6555]">
+                      Ground Truth Set ID: {groundTruthSetId || '-'}
+                      <br />
+                      Extraction Run ID: {tableView?.extraction_run_id || '-'}
+                      <br />
+                      Evaluation Run ID: {evaluationRunId || '-'}
+                    </div>
+                  </div>
+
+                  {evaluationReport && (
+                    <div className="bg-white border border-[#E5E7EB] rounded-xl p-4">
+                      <h3 className="font-semibold mb-3">Evaluation Report</h3>
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                        <div className="bg-[#FAFAF7] rounded p-2"><strong>Accuracy:</strong> {evaluationReport.field_level_accuracy}</div>
+                        <div className="bg-[#FAFAF7] rounded p-2"><strong>Coverage:</strong> {evaluationReport.coverage}</div>
+                        <div className="bg-[#FAFAF7] rounded p-2"><strong>Norm Validity:</strong> {evaluationReport.normalization_validity}</div>
+                        <div className="bg-[#FAFAF7] rounded p-2"><strong>F1:</strong> {evaluationReport.f1}</div>
+                      </div>
+                      <div className="mt-3">
+                        <div className="text-xs uppercase tracking-[0.1em] text-[#8A8470] mb-1">Qualitative Notes</div>
+                        <ul className="text-sm list-disc pl-5 space-y-1">
+                          {(evaluationReport.qualitative_notes || []).slice(0, 12).map((note, idx) => (
+                            <li key={idx}>{note}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    </div>
+                  )}
+                </section>
+              )}
+
+              {tab === 'annotations' && (
+                <section className="space-y-4">
+                  <div className="bg-white border border-[#E5E7EB] rounded-xl p-4">
+                    <h2 className="font-semibold mb-2">Diff & Annotation Layer (Lightweight)</h2>
+                    <p className="text-xs text-[#8A8470]">Annotations are non-destructive and do not modify extraction values unless review decisions are approved separately.</p>
+                  </div>
+
+                  <div className="bg-white border border-[#E5E7EB] rounded-xl overflow-hidden">
+                    <table className="w-full text-sm">
+                      <thead className="bg-[#FAFAF7]">
+                        <tr>
+                          <th className="text-left px-4 py-3 text-xs uppercase tracking-[0.1em] text-[#8A8470]">Field</th>
+                          <th className="text-left px-4 py-3 text-xs uppercase tracking-[0.1em] text-[#8A8470]">Document Version</th>
+                          <th className="text-left px-4 py-3 text-xs uppercase tracking-[0.1em] text-[#8A8470]">Author</th>
+                          <th className="text-left px-4 py-3 text-xs uppercase tracking-[0.1em] text-[#8A8470]">Approved</th>
+                          <th className="text-left px-4 py-3 text-xs uppercase tracking-[0.1em] text-[#8A8470]">Comment</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {annotations.map((annotation) => (
+                          <tr key={annotation.id} className="border-t border-[#F0F0EC]">
+                            <td className="px-4 py-3">{annotation.field_key}</td>
+                            <td className="px-4 py-3">{annotation.document_version_id}</td>
+                            <td className="px-4 py-3">{annotation.author || '-'}</td>
+                            <td className="px-4 py-3">{annotation.approved ? 'Yes' : 'No'}</td>
+                            <td className="px-4 py-3">{annotation.body}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              )}
+            </div>
+          )}
+        </div>
+      </main>
     </div>
   );
 };

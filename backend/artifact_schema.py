@@ -3,12 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Literal, Optional
 
-ParsedFormat = Literal["pdf", "html", "txt"]
+ParsedFormat = Literal["pdf", "html", "txt", "docx"]
 
 
 @dataclass
 class Citation:
-    source: Literal["pdf", "html", "txt"]
+    source: Literal["pdf", "html", "txt", "docx"]
     snippet: str
     page: Optional[int] = None
     bbox: Optional[List[float]] = None
