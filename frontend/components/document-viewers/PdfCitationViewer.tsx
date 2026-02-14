@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ExtractionCell } from '../../types';
+import { ExtractionCell, SourceCitation } from '../../types';
 import { centerVerticalScroll, pickPrimaryCitation } from './common';
 import { logRuntimeEvent } from '../../services/runtimeLogger';
 
@@ -8,6 +8,7 @@ interface PdfCitationViewerProps {
   sourceMimeType?: string;
   filename: string;
   cell?: ExtractionCell | null;
+  primaryCitation?: SourceCitation | null;
   pageIndex?: Record<string, { width: number; height: number }>;
 }
 
@@ -54,17 +55,31 @@ const bboxToOverlayStyle = (
   };
 };
 
+const isUsableBbox = (bbox: number[] | null | undefined): bbox is number[] => {
+  return Boolean(
+    bbox &&
+      bbox.length === 4 &&
+      Number.isFinite(bbox[0]) &&
+      Number.isFinite(bbox[1]) &&
+      Number.isFinite(bbox[2]) &&
+      Number.isFinite(bbox[3]) &&
+      bbox[2] > bbox[0] &&
+      bbox[3] > bbox[1]
+  );
+};
+
 export const PdfCitationViewer: React.FC<PdfCitationViewerProps> = ({
   sourceContentBase64,
   sourceMimeType,
   filename,
   cell,
+  primaryCitation: preferredCitation,
   pageIndex,
 }) => {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const renderTokenRef = useRef(0);
 
-  const primaryCitation = pickPrimaryCitation(cell?.citations);
+  const primaryCitation = preferredCitation || pickPrimaryCitation(cell?.citations);
   const [page, setPage] = useState<number>(primaryCitation?.page || cell?.page || 1);
   const [renderedPage, setRenderedPage] = useState<RenderedPdfPage | null>(null);
   const [loading, setLoading] = useState(false);
@@ -74,11 +89,11 @@ export const PdfCitationViewer: React.FC<PdfCitationViewerProps> = ({
   const pageMeta = pageIndex?.[pageKey] || null;
 
   const effectiveBBox = useMemo(() => {
-    if (primaryCitation?.bbox?.length === 4) {
-      return primaryCitation.bbox;
+    if (isUsableBbox(renderedPage?.matched_bbox || null)) {
+      return renderedPage?.matched_bbox || null;
     }
-    if (renderedPage?.matched_bbox?.length === 4) {
-      return renderedPage.matched_bbox;
+    if (isUsableBbox(primaryCitation?.bbox || null)) {
+      return primaryCitation?.bbox || null;
     }
     return null;
   }, [primaryCitation?.bbox, renderedPage?.matched_bbox]);
@@ -128,7 +143,7 @@ export const PdfCitationViewer: React.FC<PdfCitationViewerProps> = ({
             doc_format: 'pdf',
             citation_source: primaryCitation?.source || 'pdf',
             page,
-            bbox_hit: Boolean(primaryCitation?.bbox?.length === 4),
+            bbox_hit: isUsableBbox(primaryCitation?.bbox || null),
             matched_bbox_hit: Boolean(data.matched_bbox?.length === 4),
           },
         });
@@ -167,7 +182,7 @@ export const PdfCitationViewer: React.FC<PdfCitationViewerProps> = ({
     const container = scrollContainerRef.current;
     container.scrollLeft = 0;
 
-    if (!effectiveBBox || effectiveBBox.length !== 4) {
+    if (!isUsableBbox(effectiveBBox)) {
       container.scrollTo({ top: 0, left: 0, behavior: 'smooth' });
       logRuntimeEvent({
         event: 'citation_scroll_fallback_used',
@@ -256,7 +271,7 @@ export const PdfCitationViewer: React.FC<PdfCitationViewerProps> = ({
               height={renderedPage.image_height}
             />
 
-            {effectiveBBox && effectiveBBox.length === 4 && (() => {
+            {isUsableBbox(effectiveBBox) && (() => {
               const pageWidth = pageMeta?.width || renderedPage.page_width;
               const pageHeight = pageMeta?.height || renderedPage.page_height;
               const overlay = bboxToOverlayStyle(
@@ -268,18 +283,18 @@ export const PdfCitationViewer: React.FC<PdfCitationViewerProps> = ({
               );
               return (
                 <div
-                  className="absolute border-2 border-[#8B97AD] bg-[#D8DCE5]/35 pointer-events-none"
+                  className="absolute border-[3px] border-[#C2410C] bg-[#FACC15]/35 shadow-[0_0_0_2px_rgba(251,191,36,0.35)] pointer-events-none"
                   style={{
                     left: overlay.left + 16,
                     top: overlay.top + 16,
-                    width: overlay.width,
-                    height: overlay.height,
+                    width: Math.max(8, overlay.width),
+                    height: Math.max(8, overlay.height),
                   }}
                 />
               );
             })()}
 
-            {!effectiveBBox && (
+            {!isUsableBbox(effectiveBBox) && (
               <div className="mt-3 text-xs text-[#8A8470]">
                 Citation bbox unavailable on this page; rendered page shown without box highlight.
               </div>

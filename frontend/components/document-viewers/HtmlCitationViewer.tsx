@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useRef } from 'react';
-import { ExtractionCell } from '../../types';
+import { ExtractionCell, SourceCitation } from '../../types';
 import { pickPrimaryCitation } from './common';
 import { logRuntimeEvent } from '../../services/runtimeLogger';
 
 interface HtmlCitationViewerProps {
   previewHtml: string;
   cell?: ExtractionCell | null;
+  primaryCitation?: SourceCitation | null;
 }
 
 const STYLE_ID = 'citation-viewer-style';
@@ -102,10 +103,10 @@ const highlightRangeInElement = (
   }
 };
 
-export const HtmlCitationViewer: React.FC<HtmlCitationViewerProps> = ({ previewHtml, cell }) => {
+export const HtmlCitationViewer: React.FC<HtmlCitationViewerProps> = ({ previewHtml, cell, primaryCitation: preferredCitation }) => {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const renderTokenRef = useRef(0);
-  const primaryCitation = pickPrimaryCitation(cell?.citations);
+  const primaryCitation = preferredCitation || pickPrimaryCitation(cell?.citations);
 
   const srcDoc = useMemo(() => sanitizeHtml(previewHtml), [previewHtml]);
 

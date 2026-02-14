@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import tempfile
 import time
 import uuid
@@ -261,6 +262,101 @@ def _bbox_from_char_range(text_page, start: int, count: int) -> Optional[list[fl
     ]
 
 
+def _normalize_with_index_map(text: str) -> tuple[str, list[int]]:
+    normalized_chars: list[str] = []
+    index_map: list[int] = []
+    prev_space = True
+    for idx, ch in enumerate(text.lower()):
+        if ch.isalnum():
+            normalized_chars.append(ch)
+            index_map.append(idx)
+            prev_space = False
+            continue
+        if not prev_space:
+            normalized_chars.append(" ")
+            index_map.append(idx)
+            prev_space = True
+
+    while normalized_chars and normalized_chars[-1] == " ":
+        normalized_chars.pop()
+        index_map.pop()
+
+    return "".join(normalized_chars), index_map
+
+
+def _snippet_candidates(snippet: str) -> list[str]:
+    raw = re.sub(r"\s+", " ", snippet.strip())
+    if not raw:
+        return []
+
+    words = re.findall(r"\w+", raw)
+    candidates = [raw]
+
+    if words:
+        for n in (18, 14, 10, 8, 6):
+            if len(words) >= n:
+                candidates.append(" ".join(words[:n]))
+                candidates.append(" ".join(words[-n:]))
+        if len(words) >= 5:
+            mid = len(words) // 2
+            candidates.append(" ".join(words[max(0, mid - 4): mid + 4]))
+
+    deduped: list[str] = []
+    seen = set()
+    for candidate in candidates:
+        c = candidate.strip()
+        if c and c not in seen:
+            seen.add(c)
+            deduped.append(c)
+    return deduped
+
+
+def _char_span_for_snippet(text_page, snippet: str) -> Optional[tuple[int, int]]:
+    candidates = _snippet_candidates(snippet)
+    if not candidates:
+        return None
+
+    # Try exact Pdfium search first with multiple snippet variants.
+    for candidate in candidates:
+        try:
+            searcher = text_page.search(candidate)
+            first = searcher.get_next()
+            if first:
+                start_char, count = first
+                if count > 0:
+                    return int(start_char), int(count)
+        except Exception:
+            continue
+
+    # Fuzzy fallback: normalize both strings and map back to original char range.
+    try:
+        page_text = text_page.get_text_range()
+    except Exception:
+        return None
+
+    normalized_page, index_map = _normalize_with_index_map(page_text)
+    if not normalized_page or not index_map:
+        return None
+
+    for candidate in candidates:
+        normalized_candidate, _ = _normalize_with_index_map(candidate)
+        if not normalized_candidate:
+            continue
+        pos = normalized_page.find(normalized_candidate)
+        if pos < 0:
+            continue
+        end_pos = pos + len(normalized_candidate) - 1
+        if end_pos >= len(index_map):
+            continue
+
+        start_orig = index_map[pos]
+        end_orig = index_map[end_pos] + 1
+        if end_orig > start_orig:
+            return start_orig, end_orig - start_orig
+
+    return None
+
+
 @app.post("/render-pdf-page")
 async def render_pdf_page(
     request: Request,
@@ -309,14 +405,9 @@ async def render_pdf_page(
                 matched_bbox = None
                 snippet = (snippet or "").strip()
                 if snippet:
-                    try:
-                        searcher = text_page.search(snippet)
-                        first = searcher.get_next()
-                        if first:
-                            start_char, count = first
-                            matched_bbox = _bbox_from_char_range(text_page, start_char, count)
-                    except Exception:
-                        matched_bbox = None
+                    char_span = _char_span_for_snippet(text_page, snippet)
+                    if char_span:
+                        matched_bbox = _bbox_from_char_range(text_page, char_span[0], char_span[1])
             finally:
                 text_page.close()
                 page_obj.close()
