@@ -12,6 +12,7 @@ import {
   TemplateFieldDefinition,
 } from './types';
 import { DocumentViewer } from './components/document-viewers';
+import { Trash2, FolderOpen, ChevronRight, ChevronLeft, X } from './components/Icons';
 
 const REVIEW_STATUSES: ReviewStatus[] = [
   'CONFIRMED',
@@ -689,20 +690,20 @@ const App: React.FC = () => {
               </div>
               <button
                 onClick={() => setSidebarCollapsed(true)}
-                className="px-2 py-1 rounded bg-[#F5F4F0] text-[11px] font-semibold text-[#6B6555]"
+                className="p-1.5 rounded-lg hover:bg-[#F5F4F0] text-[#8A8470] hover:text-[#6B6555] transition-colors"
                 title="Collapse sidebar"
               >
-                Hide
+                <ChevronLeft className="w-4 h-4" />
               </button>
             </div>
           ) : (
             <div className="flex items-center justify-center">
               <button
                 onClick={() => setSidebarCollapsed(false)}
-                className="w-10 h-8 rounded bg-[#F5F4F0] text-xs font-semibold text-[#6B6555]"
+                className="p-2 rounded-lg hover:bg-[#F5F4F0] text-[#8A8470] hover:text-[#6B6555] transition-colors"
                 title="Expand sidebar"
               >
-                Show
+                <ChevronRight className="w-4 h-4" />
               </button>
             </div>
           )}
@@ -740,7 +741,7 @@ const App: React.FC = () => {
                 {projects.map((project) => (
                   <div
                     key={project.id}
-                    className={`w-full rounded-lg border transition-colors px-3 py-3 flex items-start gap-2 ${
+                    className={`group/project w-full rounded-lg border transition-colors px-3 py-3 flex items-center gap-2 ${
                       selectedProjectId === project.id
                         ? 'bg-[#EFF1F5] border-[#B8BFCE]'
                         : 'bg-white border-[#E5E7EB] hover:bg-[#FAFAF7]'
@@ -759,29 +760,29 @@ const App: React.FC = () => {
                         void deleteProjectById(project.id);
                       }}
                       disabled={busy}
-                      className="px-2 py-1 rounded bg-red-50 text-red-700 text-[10px] font-semibold disabled:opacity-50"
+                      className="p-1.5 rounded-lg text-[#C4BFB3] hover:text-red-500 hover:bg-red-50 opacity-0 group-hover/project:opacity-100 transition-all disabled:opacity-50"
                       title="Delete project"
                     >
-                      Del
+                      <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   </div>
                 ))}
               </div>
             </>
           ) : (
-            <div className="space-y-2">
+            <div className="space-y-1">
               {projects.map((project) => (
                 <button
                   key={project.id}
                   onClick={() => setSelectedProjectId(project.id)}
-                  className={`w-full h-11 rounded border text-xs font-semibold ${
+                  className={`w-full h-10 rounded-lg border flex items-center justify-center transition-colors ${
                     selectedProjectId === project.id
-                      ? 'bg-[#EFF1F5] border-[#B8BFCE]'
-                      : 'bg-white border-[#E5E7EB]'
+                      ? 'bg-[#EFF1F5] border-[#B8BFCE] text-[#4A5A7B]'
+                      : 'bg-white border-[#E5E7EB] text-[#C4BFB3] hover:text-[#6B6555] hover:bg-[#FAFAF7]'
                   }`}
                   title={project.name}
                 >
-                  {(project.name || 'P').trim().charAt(0).toUpperCase()}
+                  <FolderOpen className="w-4 h-4" />
                 </button>
               ))}
             </div>
@@ -852,7 +853,7 @@ const App: React.FC = () => {
           </div>
         )}
 
-        <div className="flex-1 min-h-0 overflow-hidden p-5">
+        <div className={`flex-1 min-h-0 overflow-hidden ${tab === 'table' ? 'p-0' : 'p-5'}`}>
           {!selectedProjectId ? (
             <div className="h-full flex items-center justify-center text-[#8A8470] text-sm">
               Select a project to continue.
@@ -1005,89 +1006,115 @@ const App: React.FC = () => {
               )}
 
               {tab === 'table' && (
-                <section className="h-full flex gap-4">
-                  <div className="flex-1 min-w-0 flex flex-col bg-white border border-[#E5E7EB] rounded-xl overflow-hidden">
-                    <div className="p-3 border-b border-[#E5E7EB] flex items-center gap-2 justify-between">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <button onClick={runExtraction} className="px-3 py-1.5 rounded-pill bg-[#1C1C1C] text-white text-xs font-semibold">
-                          Run Extraction
-                        </button>
-                        <button onClick={refreshTable} className="px-3 py-1.5 rounded-pill bg-[#EFF1F5] text-xs font-semibold">
-                          Refresh Table
-                        </button>
-                        <label className="text-xs text-[#8A8470]">
-                          Mode
-                          <select
-                            value={extractionMode}
-                            onChange={(e) => setExtractionMode(e.target.value as ExtractionMode)}
-                            className="ml-1 border border-[#E5E7EB] rounded px-2 py-1 text-xs text-[#1C1C1C]"
+                <section className="h-full relative">
+                  {/* Full-width table */}
+                  <div className="h-full flex flex-col bg-white border border-[#E5E7EB] rounded-xl overflow-hidden">
+                    {/* Toolbar */}
+                    <div className="border-b border-[#E5E7EB] bg-[#FAFAF7]">
+                      <div className="flex items-center justify-between px-4 py-2.5 gap-3">
+                        {/* Actions */}
+                        <div className="flex items-center gap-2 flex-shrink-0">
+                          <button onClick={runExtraction} className="px-4 py-2 rounded-lg bg-[#1C1C1C] text-white text-xs font-semibold hover:bg-[#333] transition-colors">
+                            Run Extraction
+                          </button>
+                          <button onClick={refreshTable} className="px-4 py-2 rounded-lg bg-white border border-[#E5E7EB] text-xs font-semibold text-[#1C1C1C] hover:bg-[#F5F4F0] transition-colors">
+                            Refresh Table
+                          </button>
+                        </div>
+
+                        {/* Separator */}
+                        <div className="w-px h-7 bg-[#E5E7EB] flex-shrink-0" />
+
+                        {/* Configuration */}
+                        <div className="flex items-center gap-4 flex-shrink-0">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-[10px] font-semibold text-[#8A8470] uppercase tracking-wider">Mode</span>
+                            <select
+                              value={extractionMode}
+                              onChange={(e) => setExtractionMode(e.target.value as ExtractionMode)}
+                              className="border border-[#E5E7EB] rounded-lg px-2.5 py-1.5 text-xs text-[#1C1C1C] bg-white focus:ring-1 focus:ring-[#4A5A7B] focus:border-[#4A5A7B] outline-none"
+                            >
+                              {EXTRACTION_MODES.map((mode) => (
+                                <option key={mode} value={mode}>{mode}</option>
+                              ))}
+                            </select>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-[10px] font-semibold text-[#8A8470] uppercase tracking-wider">Quality</span>
+                            <select
+                              value={qualityProfile}
+                              onChange={(e) => setQualityProfile(e.target.value as QualityProfile)}
+                              className="border border-[#E5E7EB] rounded-lg px-2.5 py-1.5 text-xs text-[#1C1C1C] bg-white focus:ring-1 focus:ring-[#4A5A7B] focus:border-[#4A5A7B] outline-none"
+                            >
+                              {QUALITY_PROFILES.map((profile) => (
+                                <option key={profile} value={profile}>{profile}</option>
+                              ))}
+                            </select>
+                          </div>
+                        </div>
+
+                        {/* Separator */}
+                        <div className="w-px h-7 bg-[#E5E7EB] flex-shrink-0" />
+
+                        {/* Filters */}
+                        <div className="flex items-center gap-2 flex-shrink-0">
+                          <span className="text-[10px] font-semibold text-[#8A8470] uppercase tracking-wider hidden lg:inline">Filters</span>
+                          <button
+                            onClick={() => setShowUnresolvedOnly((prev) => !prev)}
+                            className={`px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-colors ${showUnresolvedOnly ? 'bg-[#FBE7D8] text-[#8A3B00] ring-1 ring-[#F0C9A8]' : 'bg-white border border-[#E5E7EB] text-[#6B6555] hover:bg-[#F5F4F0]'}`}
                           >
-                            {EXTRACTION_MODES.map((mode) => (
-                              <option key={mode} value={mode}>{mode}</option>
+                            Unresolved
+                          </button>
+                          <button
+                            onClick={() => setShowLowConfidenceOnly((prev) => !prev)}
+                            className={`px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-colors ${showLowConfidenceOnly ? 'bg-[#FFF4D6] text-[#7A5A00] ring-1 ring-[#E8D9A0]' : 'bg-white border border-[#E5E7EB] text-[#6B6555] hover:bg-[#F5F4F0]'}`}
+                          >
+                            Low Confidence
+                          </button>
+                        </div>
+
+                        {/* Separator */}
+                        <div className="w-px h-7 bg-[#E5E7EB] flex-shrink-0" />
+
+                        {/* Baseline */}
+                        <div className="flex items-center gap-1.5 flex-shrink-0">
+                          <span className="text-[10px] font-semibold text-[#8A8470] uppercase tracking-wider">Baseline</span>
+                          <select
+                            value={baselineDocumentId}
+                            onChange={(e) => setBaselineDocumentId(e.target.value)}
+                            className="border border-[#E5E7EB] rounded-lg px-2.5 py-1.5 text-xs bg-white focus:ring-1 focus:ring-[#4A5A7B] focus:border-[#4A5A7B] outline-none max-w-[180px]"
+                          >
+                            <option value="">Auto</option>
+                            {(tableView?.rows || []).map((row) => (
+                              <option key={row.document_id} value={row.document_id}>{row.filename}</option>
                             ))}
                           </select>
-                        </label>
-                        <label className="text-xs text-[#8A8470]">
-                          Quality
-                          <select
-                            value={qualityProfile}
-                            onChange={(e) => setQualityProfile(e.target.value as QualityProfile)}
-                            className="ml-1 border border-[#E5E7EB] rounded px-2 py-1 text-xs text-[#1C1C1C]"
-                          >
-                            {QUALITY_PROFILES.map((profile) => (
-                              <option key={profile} value={profile}>{profile}</option>
-                            ))}
-                          </select>
-                        </label>
-                        <button
-                          onClick={() => setShowUnresolvedOnly((prev) => !prev)}
-                          className={`px-2 py-1 rounded text-[11px] font-semibold ${showUnresolvedOnly ? 'bg-[#FBE7D8] text-[#8A3B00]' : 'bg-[#F5F4F0] text-[#6B6555]'}`}
-                        >
-                          Unresolved
-                        </button>
-                        <button
-                          onClick={() => setShowLowConfidenceOnly((prev) => !prev)}
-                          className={`px-2 py-1 rounded text-[11px] font-semibold ${showLowConfidenceOnly ? 'bg-[#FFF4D6] text-[#7A5A00]' : 'bg-[#F5F4F0] text-[#6B6555]'}`}
-                        >
-                          Low Confidence
-                        </button>
-                      </div>
-                      <div className="flex items-center gap-2 text-xs">
-                        <span className="text-[#8A8470]">Baseline Doc</span>
-                        <select
-                          value={baselineDocumentId}
-                          onChange={(e) => setBaselineDocumentId(e.target.value)}
-                          className="border border-[#E5E7EB] rounded px-2 py-1"
-                        >
-                          <option value="">Auto</option>
-                          {(tableView?.rows || []).map((row) => (
-                            <option key={row.document_id} value={row.document_id}>{row.filename}</option>
-                          ))}
-                        </select>
+                        </div>
                       </div>
                     </div>
 
+                    {/* Table */}
                     <div className="flex-1 overflow-auto">
                       <table className="w-full text-sm border-collapse">
                         <thead className="bg-[#FAFAF7] sticky top-0 z-10">
                           <tr>
-                            <th className="text-left px-3 py-3 text-xs uppercase tracking-[0.1em] text-[#8A8470] sticky left-0 bg-[#FAFAF7]">Document</th>
+                            <th className="text-left px-4 py-3 text-[10px] font-semibold uppercase tracking-[0.1em] text-[#8A8470] sticky left-0 bg-[#FAFAF7] w-48">Document</th>
                             {(tableView?.columns || []).map((col) => (
-                              <th key={col.key} className="text-left px-3 py-3 text-xs uppercase tracking-[0.1em] text-[#8A8470] min-w-[220px]">{col.name}</th>
+                              <th key={col.key} className="text-left px-4 py-3 text-[10px] font-semibold uppercase tracking-[0.1em] text-[#8A8470] min-w-[220px]">{col.name}</th>
                             ))}
                           </tr>
                         </thead>
                         <tbody>
                           {displayRows.map((row) => (
-                            <tr key={row.document_version_id} className="border-t border-[#F0F0EC]">
-                              <td className="px-3 py-3 sticky left-0 bg-white text-xs font-semibold">{row.filename}</td>
+                            <tr key={row.document_version_id} className="border-t border-[#F0F0EC] hover:bg-[#FAFAF7]/50 transition-colors">
+                              <td className="px-4 py-3 sticky left-0 bg-white text-xs font-semibold w-48">{row.filename}</td>
                               {(tableView?.columns || []).map((col) => {
                                 const cell = row.cells[col.key];
                                 const selected = selectedCell?.row.document_version_id === row.document_version_id && selectedCell?.cell.field_key === col.key;
                                 return (
                                   <td
                                     key={`${row.document_version_id}_${col.key}`}
-                                    className={`px-3 py-3 align-top cursor-pointer ${selected ? 'bg-[#EFF1F5]' : 'hover:bg-[#FAFAF7]'}`}
+                                    className={`px-4 py-3 align-top cursor-pointer transition-colors ${selected ? 'bg-[#EFF1F5] ring-2 ring-inset ring-[#4A5A7B]' : 'hover:bg-[#FAFAF7]'}`}
                                     onClick={() => {
                                       setSelectedRowVersionId(row.document_version_id);
                                       setSelectedFieldKey(col.key);
@@ -1096,7 +1123,7 @@ const App: React.FC = () => {
                                     <div className="text-xs text-[#1C1C1C] whitespace-pre-wrap break-words">
                                       {cell?.effective_value || '-'}
                                     </div>
-                                    <div className="mt-1 flex gap-1 text-[10px]">
+                                    <div className="mt-1 flex flex-wrap gap-1 text-[10px]">
                                       {cell?.review_overlay?.status && (
                                         <span className="px-1.5 py-0.5 rounded bg-[#F5F4F0] text-[#6B6555]">{cell.review_overlay.status}</span>
                                       )}
@@ -1133,52 +1160,57 @@ const App: React.FC = () => {
                     </div>
                   </div>
 
-                  <div className="w-[440px] bg-white border border-[#E5E7EB] rounded-xl overflow-hidden flex flex-col">
-                    <div className="p-3 border-b border-[#E5E7EB]">
-                      <h3 className="font-semibold text-sm">Review & Audit Overlay</h3>
-                      <p className="text-xs text-[#8A8470]">Required states: CONFIRMED, REJECTED, MANUAL_UPDATED, MISSING_DATA</p>
-                    </div>
-
-                    {selectedCell ? (
-                      <div className="flex-1 overflow-auto p-3 space-y-3">
-                        <div className="text-xs text-[#8A8470]">
-                          <div><strong>Document:</strong> {selectedCell.row.filename}</div>
-                          <div><strong>Field:</strong> {selectedCell.cell.field_key}</div>
+                  {/* Review & Audit Panel - slides in from right when a cell is selected */}
+                  {selectedCell && (
+                    <div className="absolute top-0 right-0 h-full w-[440px] bg-white border-l border-[#E5E7EB] shadow-2xl flex flex-col z-30 animate-in slide-in-from-right duration-200">
+                      <div className="px-4 py-3 border-b border-[#E5E7EB] flex items-center justify-between bg-[#FAFAF7]">
+                        <div>
+                          <h3 className="font-semibold text-sm">Review & Audit</h3>
+                          <p className="text-[10px] text-[#8A8470] mt-0.5">{selectedCell.row.filename} &middot; {selectedCell.cell.field_key}</p>
                         </div>
+                        <button
+                          onClick={() => { setSelectedRowVersionId(null); setSelectedFieldKey(null); }}
+                          className="p-1.5 rounded-lg hover:bg-[#E5E7EB] text-[#8A8470] hover:text-[#333] transition-colors"
+                          title="Close panel"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
 
-                        <div className="border border-[#E5E7EB] rounded-lg p-2 bg-[#FAFAF7]">
-                          <div className="text-[11px] uppercase tracking-[0.1em] text-[#8A8470] mb-1">AI Result</div>
-                          <div className="text-sm">{selectedCell.cell.ai_result?.value || '-'}</div>
-                          <div className="text-xs text-[#6B6555] mt-1">{selectedCell.cell.ai_result?.evidence_summary || 'No evidence summary.'}</div>
-                          <div className="mt-2 flex flex-wrap gap-1 text-[10px]">
+                      <div className="flex-1 overflow-auto p-4 space-y-4">
+                        <div className="border border-[#E5E7EB] rounded-xl p-3 bg-[#FAFAF7]">
+                          <div className="text-[10px] font-semibold uppercase tracking-[0.1em] text-[#8A8470] mb-2">AI Result</div>
+                          <div className="text-sm text-[#1C1C1C] leading-relaxed">{selectedCell.cell.ai_result?.value || '-'}</div>
+                          <div className="text-xs text-[#6B6555] mt-2 leading-relaxed">{selectedCell.cell.ai_result?.evidence_summary || 'No evidence summary.'}</div>
+                          <div className="mt-3 flex flex-wrap gap-1.5 text-[10px]">
                             {selectedCell.cell.ai_result?.extraction_method && (
-                              <span className="px-1.5 py-0.5 rounded bg-[#E8EEF8] text-[#304A7A]">
+                              <span className="px-2 py-0.5 rounded-full bg-[#E8EEF8] text-[#304A7A] font-medium">
                                 {selectedCell.cell.ai_result.extraction_method}
                               </span>
                             )}
                             {selectedCell.cell.ai_result?.verifier_status && selectedCell.cell.ai_result.verifier_status !== 'SKIPPED' && (
-                              <span className="px-1.5 py-0.5 rounded bg-[#F5F4F0] text-[#6B6555]">
+                              <span className="px-2 py-0.5 rounded-full bg-[#F5F4F0] text-[#6B6555] font-medium">
                                 verifier: {selectedCell.cell.ai_result.verifier_status}
                               </span>
                             )}
-                            <span className="px-1.5 py-0.5 rounded bg-[#F5F4F0] text-[#6B6555]">
+                            <span className="px-2 py-0.5 rounded-full bg-[#F5F4F0] text-[#6B6555] font-medium">
                               conf: {(selectedCell.cell.ai_result?.confidence_score || 0).toFixed(3)}
                             </span>
                           </div>
                           {selectedCell.cell.ai_result?.uncertainty_reason && (
-                            <div className="text-[11px] text-[#8A3B00] mt-2">
+                            <div className="text-[11px] text-[#8A3B00] mt-2 bg-[#FBE7D8] rounded-lg px-2 py-1">
                               {selectedCell.cell.ai_result.uncertainty_reason}
                             </div>
                           )}
                         </div>
 
-                        <div className="grid grid-cols-1 gap-2">
-                          <label className="text-xs">
-                            <span className="block text-[#8A8470] mb-1">Review Status</span>
+                        <div className="space-y-3">
+                          <label className="text-xs block">
+                            <span className="block text-[10px] font-semibold text-[#8A8470] uppercase tracking-wider mb-1.5">Review Status</span>
                             <select
                               value={reviewStatus}
                               onChange={(e) => setReviewStatus(e.target.value as ReviewStatus)}
-                              className="w-full border border-[#E5E7EB] rounded px-2 py-1 text-sm"
+                              className="w-full border border-[#E5E7EB] rounded-lg px-3 py-2 text-sm focus:ring-1 focus:ring-[#4A5A7B] focus:border-[#4A5A7B] outline-none"
                             >
                               {REVIEW_STATUSES.map((status) => (
                                 <option key={status} value={status}>{status}</option>
@@ -1186,66 +1218,64 @@ const App: React.FC = () => {
                             </select>
                           </label>
 
-                          <label className="text-xs">
-                            <span className="block text-[#8A8470] mb-1">Manual Value</span>
+                          <label className="text-xs block">
+                            <span className="block text-[10px] font-semibold text-[#8A8470] uppercase tracking-wider mb-1.5">Manual Value</span>
                             <textarea
                               value={manualValue}
                               onChange={(e) => setManualValue(e.target.value)}
-                              className="w-full border border-[#E5E7EB] rounded px-2 py-1 text-sm min-h-[80px]"
+                              className="w-full border border-[#E5E7EB] rounded-lg px-3 py-2 text-sm min-h-[80px] focus:ring-1 focus:ring-[#4A5A7B] focus:border-[#4A5A7B] outline-none resize-y"
                             />
                           </label>
 
-                          <label className="text-xs">
-                            <span className="block text-[#8A8470] mb-1">Reviewer</span>
-                            <input
-                              value={reviewer}
-                              onChange={(e) => setReviewer(e.target.value)}
-                              className="w-full border border-[#E5E7EB] rounded px-2 py-1 text-sm"
-                            />
-                          </label>
+                          <div className="grid grid-cols-2 gap-3">
+                            <label className="text-xs block">
+                              <span className="block text-[10px] font-semibold text-[#8A8470] uppercase tracking-wider mb-1.5">Reviewer</span>
+                              <input
+                                value={reviewer}
+                                onChange={(e) => setReviewer(e.target.value)}
+                                className="w-full border border-[#E5E7EB] rounded-lg px-3 py-2 text-sm focus:ring-1 focus:ring-[#4A5A7B] focus:border-[#4A5A7B] outline-none"
+                              />
+                            </label>
 
-                          <label className="text-xs">
-                            <span className="block text-[#8A8470] mb-1">Notes</span>
-                            <textarea
-                              value={reviewNotes}
-                              onChange={(e) => setReviewNotes(e.target.value)}
-                              className="w-full border border-[#E5E7EB] rounded px-2 py-1 text-sm min-h-[70px]"
-                            />
-                          </label>
+                            <label className="text-xs block">
+                              <span className="block text-[10px] font-semibold text-[#8A8470] uppercase tracking-wider mb-1.5">Notes</span>
+                              <input
+                                value={reviewNotes}
+                                onChange={(e) => setReviewNotes(e.target.value)}
+                                className="w-full border border-[#E5E7EB] rounded-lg px-3 py-2 text-sm focus:ring-1 focus:ring-[#4A5A7B] focus:border-[#4A5A7B] outline-none"
+                              />
+                            </label>
+                          </div>
                         </div>
 
-                        <button onClick={saveReview} className="w-full px-3 py-2 rounded-pill bg-[#1C1C1C] text-white text-xs font-semibold">
+                        <button onClick={saveReview} className="w-full px-4 py-2.5 rounded-lg bg-[#1C1C1C] text-white text-xs font-semibold hover:bg-[#333] transition-colors">
                           Save Review Decision
                         </button>
 
-                        <div className="border-t border-[#E5E7EB] pt-3">
-                          <div className="text-xs font-semibold mb-1">Annotation</div>
+                        <div className="border-t border-[#E5E7EB] pt-4">
+                          <div className="text-[10px] font-semibold text-[#8A8470] uppercase tracking-wider mb-2">Annotation</div>
                           <textarea
                             value={annotationBody}
                             onChange={(e) => setAnnotationBody(e.target.value)}
-                            className="w-full border border-[#E5E7EB] rounded px-2 py-1 text-sm min-h-[70px]"
+                            className="w-full border border-[#E5E7EB] rounded-lg px-3 py-2 text-sm min-h-[60px] focus:ring-1 focus:ring-[#4A5A7B] focus:border-[#4A5A7B] outline-none resize-y"
                             placeholder="Comment tied to this field/document"
                           />
-                          <button onClick={addAnnotation} className="mt-2 w-full px-3 py-2 rounded-pill bg-[#4A5A7B] text-white text-xs font-semibold">
+                          <button onClick={addAnnotation} className="mt-2 w-full px-4 py-2.5 rounded-lg bg-[#4A5A7B] text-white text-xs font-semibold hover:bg-[#3D4D6A] transition-colors">
                             Add Annotation
                           </button>
                         </div>
 
                         {selectedViewerDocument && (
-                          <div className="border-t border-[#E5E7EB] pt-3">
-                            <div className="text-xs font-semibold mb-2">Citation Viewer</div>
-                            <div className="h-[360px] border border-[#E5E7EB] rounded overflow-hidden bg-[#F5F4F0]">
+                          <div className="border-t border-[#E5E7EB] pt-4">
+                            <div className="text-[10px] font-semibold text-[#8A8470] uppercase tracking-wider mb-2">Citation Viewer</div>
+                            <div className="h-[360px] border border-[#E5E7EB] rounded-lg overflow-hidden bg-[#F5F4F0]">
                               <DocumentViewer document={selectedViewerDocument} cell={selectedViewerCell} />
                             </div>
                           </div>
                         )}
                       </div>
-                    ) : (
-                      <div className="flex-1 flex items-center justify-center text-xs text-[#8A8470]">
-                        Select a table cell to review.
-                      </div>
-                    )}
-                  </div>
+                    </div>
+                  )}
                 </section>
               )}
 
