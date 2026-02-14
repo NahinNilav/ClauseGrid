@@ -4,6 +4,7 @@ import { VerificationSidebar } from './components/VerificationSidebar';
 import { ChatInterface } from './components/ChatInterface';
 import { AddColumnMenu } from './components/AddColumnMenu';
 import { ColumnLibrary } from './components/ColumnLibrary';
+import { AgenticLoadingOverlay } from './components/AgenticLoadingOverlay';
 import { extractColumnData } from './services/geminiService';
 import { processDocumentToMarkdown } from './services/documentProcessor';
 import { createRunId, logRuntimeEvent } from './services/runtimeLogger';
@@ -50,6 +51,7 @@ const App: React.FC = () => {
   // Extraction Control
   const [isProcessing, setIsProcessing] = useState(false);
   const [isConverting, setIsConverting] = useState(false);
+  const [processingProgress, setProcessingProgress] = useState<{ current: number; total: number } | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   
@@ -139,10 +141,13 @@ const App: React.FC = () => {
     });
 
     setIsConverting(true);
+    setProcessingProgress({ current: 0, total: fileList.length });
     try {
         const processedFiles: DocumentFile[] = [];
 
-        for (const file of fileList) {
+        for (let i = 0; i < fileList.length; i++) {
+          const file = fileList[i];
+          
           // Use local deterministic processor (markitdown style)
           const markdownContent = await processDocumentToMarkdown(file);
           
@@ -158,6 +163,9 @@ const App: React.FC = () => {
             content: contentBase64,
             mimeType: 'text/markdown' // Force to markdown so the viewer treats it as text
           });
+
+          // Update progress AFTER file is processed
+          setProcessingProgress({ current: i + 1, total: fileList.length });
 
           logRuntimeEvent({
             event: 'upload_document_ready',
@@ -194,7 +202,11 @@ const App: React.FC = () => {
         });
         alert("Error processing some files. Please check if they are valid PDF or DOCX documents.");
     } finally {
-        setIsConverting(false);
+        // Small delay to ensure the completion animation plays
+        setTimeout(() => {
+          setIsConverting(false);
+          setProcessingProgress(null);
+        }, 800);
     }
   };
 
@@ -874,18 +886,11 @@ const App: React.FC = () => {
         <main className="flex-1 flex overflow-hidden relative p-4 pt-2">
           {/* Conversion Overlay */}
           {isConverting && (
-            <div className="absolute inset-0 z-50 bg-[#F5F4F0]/90 backdrop-blur-sm flex flex-col items-center justify-center animate-in fade-in duration-200">
-                <div className="bg-white p-10 rounded-2xl shadow-elevated border border-[#E5E7EB] flex flex-col items-center max-w-md text-center">
-                    <div className="relative mb-6">
-                        <div className="absolute inset-0 bg-[#D8DCE5] rounded-full animate-ping opacity-50"></div>
-                        <div className="relative bg-[#EFF1F5] p-4 rounded-full">
-                            <Loader2 className="w-10 h-10 text-[#4A5A7B] animate-spin" />
-                        </div>
-                    </div>
-                    <h3 className="text-xl font-bold text-black mb-2 font-serif">Converting Documents</h3>
-                    <p className="text-[#8A8470]">Using local Docling engine to preserve formatting and structure...</p>
-                </div>
-            </div>
+            <AgenticLoadingOverlay 
+              processingComplete={processingProgress?.current === processingProgress?.total}
+              currentFile={processingProgress?.current || 0}
+              totalFiles={processingProgress?.total || 0}
+            />
           )}
 
           <div className="flex-1 flex flex-col min-w-0 bg-white rounded-xl shadow-card overflow-hidden">
