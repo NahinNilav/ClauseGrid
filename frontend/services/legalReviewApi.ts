@@ -178,5 +178,39 @@ export const api = {
     return requestJson<{ annotations: any[] }>(`/api/projects/${projectId}/annotations${qs}`);
   },
 
+  listProjectTasks: (projectId: string, status?: string, limit = 200) => {
+    const params = new URLSearchParams();
+    if (status) params.set('status', status);
+    if (limit) params.set('limit', String(limit));
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    return requestJson<{ tasks: RequestTask[] }>(`/api/projects/${projectId}/tasks${qs}`);
+  },
+
+  cancelTask: (taskId: string, options?: { reason?: string; purge?: boolean }) => {
+    const params = new URLSearchParams();
+    if (options?.reason) params.set('reason', options.reason);
+    if (options?.purge) params.set('purge', 'true');
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    return requestJson<{ task?: RequestTask; task_id?: string; status?: string; deleted?: boolean }>(
+      `/api/tasks/${taskId}/cancel${qs}`,
+      {
+        method: 'POST',
+      }
+    );
+  },
+
+  cancelProjectPendingTasks: (projectId: string, purge = false) =>
+    requestJson<{ project_id: string; canceled_count: number; canceled_task_ids: string[]; deleted_count: number }>(
+      `/api/projects/${projectId}/tasks/cancel-pending${purge ? '?purge=true' : ''}`,
+      {
+        method: 'POST',
+      }
+    ),
+
+  deleteTask: (taskId: string, force = false) =>
+    requestJson<{ task_id: string; deleted: boolean }>(`/api/tasks/${taskId}${force ? '?force=true' : ''}`, {
+      method: 'DELETE',
+    }),
+
   getTask: (taskId: string) => requestJson<{ task: RequestTask }>(`/api/tasks/${taskId}`),
 };

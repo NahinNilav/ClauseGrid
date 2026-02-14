@@ -221,6 +221,18 @@ const App: React.FC = () => {
     return rows;
   }, [tableView, showUnresolvedOnly, showLowConfidenceOnly]);
 
+  const uniquePendingTaskIds = useMemo(() => Array.from(new Set(pendingTaskIds)), [pendingTaskIds]);
+
+  const addPendingTaskIds = (ids: Array<string | null | undefined>) => {
+    const normalized = ids.filter((id): id is string => Boolean(id));
+    if (!normalized.length) return;
+    setPendingTaskIds((prev) => Array.from(new Set([...prev, ...normalized])));
+  };
+
+  const removePendingTaskId = (taskId: string) => {
+    setPendingTaskIds((prev) => prev.filter((id) => id !== taskId));
+  };
+
   const refreshProjects = async () => {
     try {
       const data = await api.listProjects();
@@ -274,16 +286,19 @@ const App: React.FC = () => {
   }, [selectedProjectId]);
 
   useEffect(() => {
-    if (!pendingTaskIds.length) return;
+    if (!uniquePendingTaskIds.length) return;
+    let isPolling = false;
     const timer = setInterval(async () => {
-      for (const taskId of pendingTaskIds) {
+      if (isPolling) return;
+      isPolling = true;
+      for (const taskId of uniquePendingTaskIds) {
         try {
           const data = await api.getTask(taskId);
           const task = data.task;
           setTasks((prev) => ({ ...prev, [taskId]: task }));
 
-          if (task.status === 'SUCCEEDED' || task.status === 'FAILED') {
-            setPendingTaskIds((prev) => prev.filter((id) => id !== taskId));
+          if (task.status === 'SUCCEEDED' || task.status === 'FAILED' || task.status === 'CANCELED') {
+            removePendingTaskId(taskId);
 
             if (selectedProjectId) {
               await refreshProjectContext(selectedProjectId, tab === 'table');
@@ -299,13 +314,19 @@ const App: React.FC = () => {
               }
             }
           }
-        } catch {
+        } catch (err: any) {
+          const message = String(err?.message || '');
+          if (message.includes('Task does not exist') || message.includes('(404)')) {
+            removePendingTaskId(taskId);
+            continue;
+          }
           // Ignore transient polling failures.
         }
       }
+      isPolling = false;
     }, 1500);
     return () => clearInterval(timer);
-  }, [pendingTaskIds, selectedProjectId, tab, evaluationRunId]);
+  }, [uniquePendingTaskIds, selectedProjectId, tab, evaluationRunId]);
 
   const createProject = async () => {
     if (!newProjectName.trim()) return;
@@ -336,7 +357,7 @@ const App: React.FC = () => {
         const result = await api.uploadProjectDocument(selectedProjectId, file);
         ids.push(result.task_id);
       }
-      setPendingTaskIds((prev) => [...prev, ...ids]);
+      addPendingTaskIds(ids);
       await refreshProjectContext(selectedProjectId, false);
     } catch (err: any) {
       setError(err.message || 'Failed to upload documents');
@@ -377,7 +398,7 @@ const App: React.FC = () => {
       };
       const data = await api.createTemplate(selectedProjectId, payload);
       if (data.triggered_extraction_task_id) {
-        setPendingTaskIds((prev) => [...prev, data.triggered_extraction_task_id!]);
+        addPendingTaskIds([data.triggered_extraction_task_id]);
       }
       await refreshProjectContext(selectedProjectId, true);
       setSelectedTemplateId(data.template.id);
@@ -404,7 +425,7 @@ const App: React.FC = () => {
           boolean_policy: 'strict_true_false',
         },
       });
-      setPendingTaskIds((prev) => [...prev, data.triggered_extraction_task_id]);
+      addPendingTaskIds([data.triggered_extraction_task_id]);
       setSelectedTemplateVersionId(data.template_version.id);
       await refreshProjectContext(selectedProjectId, true);
       setTab('table');
@@ -426,7 +447,7 @@ const App: React.FC = () => {
         extractionMode,
         qualityProfile
       );
-      setPendingTaskIds((prev) => [...prev, data.task_id]);
+      addPendingTaskIds([data.task_id]);
     } catch (err: any) {
       setError(err.message || 'Failed to start extraction run');
     } finally {
@@ -539,9 +560,61 @@ const App: React.FC = () => {
         extraction_run_id: tableView.extraction_run_id,
       });
       setEvaluationRunId(data.evaluation_run_id);
-      setPendingTaskIds((prev) => [...prev, data.task_id]);
+      addPendingTaskIds([data.task_id]);
     } catch (err: any) {
       setError(err.message || 'Failed to start evaluation run');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const cancelTaskById = async (taskId: string) => {
+    setBusy(true);
+    setError('');
+    try {
+      const data = await api.cancelTask(taskId, { reason: 'Canceled by user from UI.', purge: true });
+      removePendingTaskId(taskId);
+      if (data.task) {
+        setTasks((prev) => ({ ...prev, [taskId]: data.task as RequestTask }));
+      } else {
+        setTasks((prev) => {
+          const next = { ...prev };
+          delete next[taskId];
+          return next;
+        });
+      }
+      if (selectedProjectId) {
+        await refreshProjectContext(selectedProjectId, tab === 'table');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to cancel task');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const cancelAllPendingTasks = async () => {
+    if (!selectedProjectId || !uniquePendingTaskIds.length) return;
+    setBusy(true);
+    setError('');
+    try {
+      const result = await api.cancelProjectPendingTasks(selectedProjectId, true);
+      const canceled = result.canceled_task_ids || [];
+      if (canceled.length) {
+        setTasks((prev) => {
+          const next = { ...prev };
+          canceled.forEach((id) => {
+            delete next[id];
+          });
+          return next;
+        });
+      }
+      setPendingTaskIds((prev) => prev.filter((id) => !canceled.includes(id)));
+      if (selectedProjectId) {
+        await refreshProjectContext(selectedProjectId, tab === 'table');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to cancel pending tasks');
     } finally {
       setBusy(false);
     }
@@ -601,12 +674,30 @@ const App: React.FC = () => {
         </div>
 
         <div className="border-t border-[#E5E7EB] p-3 text-xs text-[#8A8470]">
-          <div>Tasks In Flight: {pendingTaskIds.length}</div>
-          {pendingTaskIds.slice(0, 4).map((id) => {
+          <div className="flex items-center justify-between gap-2">
+            <span>Tasks In Flight: {uniquePendingTaskIds.length}</span>
+            <button
+              onClick={cancelAllPendingTasks}
+              disabled={busy || !selectedProjectId || !uniquePendingTaskIds.length}
+              className="px-2 py-1 rounded bg-[#FBE7D8] text-[#8A3B00] text-[10px] font-semibold disabled:opacity-50"
+            >
+              Cancel Pending
+            </button>
+          </div>
+          {uniquePendingTaskIds.slice(0, 6).map((id) => {
             const task = tasks[id];
             return (
-              <div key={id} className="truncate">
-                {task?.task_type || 'TASK'} · {task?.status || 'QUEUED'}
+              <div key={id} className="mt-1 flex items-center justify-between gap-2">
+                <span className="truncate">
+                  {task?.task_type || 'TASK'} · {task?.status || 'QUEUED'}
+                </span>
+                <button
+                  onClick={() => void cancelTaskById(id)}
+                  disabled={busy}
+                  className="px-2 py-0.5 rounded bg-[#F5F4F0] text-[10px] font-semibold text-[#6B6555] disabled:opacity-50"
+                >
+                  Cancel
+                </button>
               </div>
             );
           })}

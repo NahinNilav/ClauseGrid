@@ -123,9 +123,29 @@ def _parse_document_to_artifact(
 
 
 def _run_extraction_task(task_id: str, run_id: str) -> None:
+    task = service.get_task(task_id)
+    if not task:
+        return
+    if task.get("status") == "CANCELED":
+        service.mark_extraction_run_canceled(run_id, "Canceled before extraction started.")
+        return
+
     service.update_task(task_id, status="RUNNING")
+    if service.is_task_canceled(task_id):
+        service.mark_extraction_run_canceled(run_id, "Canceled before extraction started.")
+        return
     try:
-        run = service.run_extraction(run_id)
+        run = service.run_extraction(run_id, task_id=task_id)
+        if service.is_task_canceled(task_id) or str(run.get("status") or "") == "CANCELED":
+            service.update_task(
+                task_id,
+                status="CANCELED",
+                progress_current=run.get("completed_cells", 0) + run.get("failed_cells", 0),
+                progress_total=run.get("total_cells", 0),
+                payload=run,
+                error_message=run.get("error_message") or "Canceled by user.",
+            )
+            return
         service.update_task(
             task_id,
             status="SUCCEEDED",
@@ -134,6 +154,10 @@ def _run_extraction_task(task_id: str, run_id: str) -> None:
             payload=run,
         )
     except Exception as exc:
+        if service.is_task_canceled(task_id):
+            service.mark_extraction_run_canceled(run_id, "Canceled by user.")
+            service.update_task(task_id, status="CANCELED", error_message="Canceled by user.")
+            return
         service.mark_extraction_run_failed(run_id, str(exc))
         service.update_task(task_id, status="FAILED", error_message=str(exc))
 
@@ -147,13 +171,24 @@ def _run_parse_task(
     declared_mime_type: str | None,
     raw_bytes: bytes,
 ) -> None:
+    task = service.get_task(task_id)
+    if not task:
+        return
+    if task.get("status") == "CANCELED":
+        return
+
     service.update_task(task_id, status="RUNNING", progress_current=0, progress_total=1)
+    if service.is_task_canceled(task_id):
+        return
     try:
         artifact, routed = _parse_document_to_artifact(
             raw_bytes=raw_bytes,
             filename=filename,
             declared_mime_type=declared_mime_type,
         )
+        if service.is_task_canceled(task_id):
+            service.update_task(task_id, status="CANCELED", error_message="Canceled by user.")
+            return
         doc_version = service.create_document_version(
             document_id=document_id,
             parse_status="COMPLETED",
@@ -181,6 +216,9 @@ def _run_parse_task(
             _run_extraction_task(extraction_task["id"], run["id"])
             payload["triggered_extraction_task_id"] = extraction_task["id"]
 
+        if service.is_task_canceled(task_id):
+            service.update_task(task_id, status="CANCELED", payload=payload, error_message="Canceled by user.")
+            return
         service.update_task(
             task_id,
             status="SUCCEEDED",
@@ -198,13 +236,36 @@ def _run_parse_task(
             )
         except Exception:
             pass
+        if service.is_task_canceled(task_id):
+            service.update_task(task_id, status="CANCELED", error_message="Canceled by user.")
+            return
         service.update_task(task_id, status="FAILED", error_message=str(exc))
 
 
 def _run_evaluation_task(task_id: str, evaluation_run_id: str) -> None:
+    task = service.get_task(task_id)
+    if not task:
+        return
+    if task.get("status") == "CANCELED":
+        service.mark_evaluation_run_canceled(evaluation_run_id, "Canceled before evaluation started.")
+        return
+
     service.update_task(task_id, status="RUNNING")
+    if service.is_task_canceled(task_id):
+        service.mark_evaluation_run_canceled(evaluation_run_id, "Canceled before evaluation started.")
+        return
     try:
-        result = service.run_evaluation(evaluation_run_id)
+        result = service.run_evaluation(evaluation_run_id, task_id=task_id)
+        if service.is_task_canceled(task_id) or str(result.get("status") or "") == "CANCELED":
+            service.update_task(
+                task_id,
+                status="CANCELED",
+                progress_current=0,
+                progress_total=1,
+                payload={"evaluation_run_id": evaluation_run_id, "result": result},
+                error_message=result.get("notes") or "Canceled by user.",
+            )
+            return
         service.update_task(
             task_id,
             status="SUCCEEDED",
@@ -213,6 +274,10 @@ def _run_evaluation_task(task_id: str, evaluation_run_id: str) -> None:
             payload={"evaluation_run_id": evaluation_run_id, "result": result},
         )
     except Exception as exc:
+        if service.is_task_canceled(task_id):
+            service.mark_evaluation_run_canceled(evaluation_run_id, "Canceled by user.")
+            service.update_task(task_id, status="CANCELED", error_message="Canceled by user.")
+            return
         service.mark_evaluation_run_failed(evaluation_run_id, str(exc))
         service.update_task(task_id, status="FAILED", error_message=str(exc))
 
@@ -629,6 +694,66 @@ def list_annotations(project_id: str, template_version_id: str | None = None):
         return _problem(404, "Project Not Found", "Project does not exist", instance=f"/api/projects/{project_id}/annotations")
     annotations = service.list_annotations(project_id, template_version_id=template_version_id)
     return {"annotations": annotations}
+
+
+@router.get("/projects/{project_id}/tasks")
+def list_project_tasks(project_id: str, status: str | None = None, limit: int = 200):
+    if not service.get_project(project_id):
+        return _problem(404, "Project Not Found", "Project does not exist", instance=f"/api/projects/{project_id}/tasks")
+    statuses = None
+    if status:
+        statuses = [item.strip().upper() for item in status.split(",") if item.strip()]
+    tasks = service.list_tasks(project_id=project_id, statuses=statuses, limit=limit)
+    return {"tasks": tasks}
+
+
+@router.post("/tasks/{task_id}/cancel")
+def cancel_task(task_id: str, reason: str | None = None, purge: bool = False):
+    task = service.cancel_task(task_id, reason=reason)
+    if not task:
+        return _problem(404, "Task Not Found", "Task does not exist", instance=f"/api/tasks/{task_id}/cancel")
+
+    deleted = False
+    if purge:
+        try:
+            deleted = service.delete_task(task_id, force=False)
+        except ValueError:
+            deleted = False
+    if deleted:
+        return {"task_id": task_id, "status": "CANCELED", "deleted": True}
+    return {"task": task}
+
+
+@router.post("/projects/{project_id}/tasks/cancel-pending")
+def cancel_project_pending_tasks(project_id: str, purge: bool = False):
+    if not service.get_project(project_id):
+        return _problem(
+            404,
+            "Project Not Found",
+            "Project does not exist",
+            instance=f"/api/projects/{project_id}/tasks/cancel-pending",
+        )
+    canceled_tasks = service.cancel_project_tasks(project_id, reason="Canceled by user.")
+    canceled_ids = [task["id"] for task in canceled_tasks]
+    deleted_count = service.delete_tasks(canceled_ids) if purge and canceled_ids else 0
+    return {
+        "project_id": project_id,
+        "canceled_count": len(canceled_ids),
+        "canceled_task_ids": canceled_ids,
+        "deleted_count": deleted_count,
+    }
+
+
+@router.delete("/tasks/{task_id}")
+def delete_task(task_id: str, force: bool = False):
+    task = service.get_task(task_id)
+    if not task:
+        return _problem(404, "Task Not Found", "Task does not exist", instance=f"/api/tasks/{task_id}")
+    try:
+        deleted = service.delete_task(task_id, force=force)
+    except ValueError as exc:
+        return _problem(409, "Task Deletion Blocked", str(exc), instance=f"/api/tasks/{task_id}")
+    return {"task_id": task_id, "deleted": bool(deleted)}
 
 
 @router.get("/tasks/{task_id}")

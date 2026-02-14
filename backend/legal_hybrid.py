@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
+import random
 import re
+import time
 from typing import Any, Dict, List, Tuple
 
 try:
     from google import genai
 except Exception:  # pragma: no cover - optional dependency in local envs
     genai = None
+
+
+logger = logging.getLogger("tabular.server")
 
 
 LEGAL_SYNONYMS: Dict[str, List[str]] = {
@@ -129,6 +135,14 @@ class GeminiLegalClient:
         self.extraction_model = os.getenv("LEGAL_EXTRACTION_MODEL", "gemini-3-pro-preview")
         self.extraction_fast_model = os.getenv("LEGAL_EXTRACTION_FAST_MODEL", "gemini-3-flash-preview")
         self.verifier_model = os.getenv("LEGAL_VERIFIER_MODEL", self.extraction_model)
+        try:
+            self.rate_limit_retries = max(0, int(os.getenv("GEMINI_RATE_LIMIT_RETRIES", "2")))
+        except ValueError:
+            self.rate_limit_retries = 2
+        try:
+            self.rate_limit_base_delay_seconds = max(0.1, float(os.getenv("GEMINI_RATE_LIMIT_BASE_DELAY_SECONDS", "1.0")))
+        except ValueError:
+            self.rate_limit_base_delay_seconds = 1.0
         self.client = None
         if genai is not None:
             try:
@@ -160,9 +174,37 @@ class GeminiLegalClient:
             return "medium" if is_flash else "low"
         return "high"
 
+    @staticmethod
+    def _is_rate_limit_error(exc: Exception) -> bool:
+        status = getattr(exc, "status_code", None)
+        if status is None:
+            status = getattr(exc, "status", None)
+        if status is None:
+            status = getattr(exc, "code", None)
+        if status == 429:
+            return True
+
+        message = _normalize_space(str(exc)).lower()
+        return any(
+            token in message
+            for token in (
+                "429",
+                "resource_exhausted",
+                "quota",
+                "rate limit",
+                "too many requests",
+            )
+        )
+
+    @staticmethod
+    def _log_structured(level: int, event: str, **fields: Any) -> None:
+        payload = {"event": event, **fields}
+        logger.log(level, json.dumps(payload, default=str))
+
     def _generate(
         self,
         *,
+        operation: str,
         model: str,
         prompt: str,
         quality_profile: str,
@@ -180,14 +222,50 @@ class GeminiLegalClient:
         if response_schema:
             config["response_json_schema"] = response_schema
 
-        try:
-            response = self.client.models.generate_content(
-                model=model,
-                contents=prompt,
-                config=config,
-            )
-        except Exception as exc:
-            raise RuntimeError(f"Gemini request failed: {exc}") from exc
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                response = self.client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config=config,
+                )
+                break
+            except Exception as exc:
+                is_rate_limited = self._is_rate_limit_error(exc)
+                if is_rate_limited:
+                    can_retry = attempt <= self.rate_limit_retries
+                    self._log_structured(
+                        logging.WARNING if can_retry else logging.ERROR,
+                        "gemini_rate_limited",
+                        operation=operation,
+                        model=model,
+                        quality_profile=quality_profile,
+                        thinking_level=thinking_level,
+                        attempt=attempt,
+                        max_retries=self.rate_limit_retries,
+                        will_retry=can_retry,
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                    )
+                    if can_retry:
+                        delay_seconds = self.rate_limit_base_delay_seconds * (2 ** (attempt - 1)) + random.random()
+                        time.sleep(delay_seconds)
+                        continue
+
+                self._log_structured(
+                    logging.ERROR,
+                    "gemini_request_failed",
+                    operation=operation,
+                    model=model,
+                    quality_profile=quality_profile,
+                    thinking_level=thinking_level,
+                    attempt=attempt,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+                raise RuntimeError(f"Gemini request failed: {exc}") from exc
 
         text = str(getattr(response, "text", "") or "").strip()
         if not text:
@@ -273,6 +351,7 @@ class GeminiLegalClient:
             },
         }
         text = self._generate(
+            operation="extract",
             model=model,
             prompt=prompt,
             quality_profile=quality_profile,
@@ -335,6 +414,7 @@ class GeminiLegalClient:
             },
         }
         text = self._generate(
+            operation="verify",
             model=self.verifier_model,
             prompt=prompt,
             quality_profile="high",

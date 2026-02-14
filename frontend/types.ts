@@ -150,7 +150,7 @@ export interface RequestTask {
   id: string;
   project_id?: string | null;
   task_type: string;
-  status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED';
+  status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELED';
   entity_id?: string | null;
   progress_current: number;
   progress_total: number;

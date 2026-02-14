@@ -6,6 +6,7 @@ import unittest
 from fastapi.testclient import TestClient
 
 from app import app
+from legal_service import service
 
 
 class LegalApiWorkflowTests(unittest.TestCase):
@@ -19,7 +20,7 @@ class LegalApiWorkflowTests(unittest.TestCase):
             response = self.client.get(f"/api/tasks/{task_id}")
             self.assertEqual(response.status_code, 200, msg=response.text)
             task = response.json()["task"]
-            if task["status"] in {"SUCCEEDED", "FAILED"}:
+            if task["status"] in {"SUCCEEDED", "FAILED", "CANCELED"}:
                 return task
             time.sleep(0.1)
         self.fail(f"Task {task_id} did not finish within {timeout_seconds} seconds")
@@ -173,6 +174,52 @@ class LegalApiWorkflowTests(unittest.TestCase):
         self.assertIn("field_level_accuracy", metrics)
         self.assertIn("coverage", metrics)
         self.assertIn("normalization_validity", metrics)
+
+    def test_cancel_and_delete_pending_tasks(self):
+        create_project = self.client.post(
+            "/api/projects",
+            json={"name": "Task Cancel Demo", "description": "Task cancellation validation"},
+        )
+        self.assertEqual(create_project.status_code, 200, msg=create_project.text)
+        project_id = create_project.json()["project"]["id"]
+
+        task_a = service.create_task(
+            task_type="PARSE_DOCUMENT",
+            project_id=project_id,
+            entity_id="doc_stub_a",
+            payload={"name": "stub-a"},
+        )
+        task_b = service.create_task(
+            task_type="EXTRACTION_RUN",
+            project_id=project_id,
+            entity_id="run_stub_b",
+            payload={"name": "stub-b"},
+        )
+
+        bulk_cancel = self.client.post(f"/api/projects/{project_id}/tasks/cancel-pending?purge=true")
+        self.assertEqual(bulk_cancel.status_code, 200, msg=bulk_cancel.text)
+        bulk_payload = bulk_cancel.json()
+        self.assertEqual(bulk_payload.get("canceled_count"), 2)
+        self.assertIn(task_a["id"], bulk_payload.get("canceled_task_ids", []))
+        self.assertIn(task_b["id"], bulk_payload.get("canceled_task_ids", []))
+        self.assertEqual(bulk_payload.get("deleted_count"), 2)
+
+        task_a_get = self.client.get(f"/api/tasks/{task_a['id']}")
+        self.assertEqual(task_a_get.status_code, 404, msg=task_a_get.text)
+
+        task_c = service.create_task(
+            task_type="PARSE_DOCUMENT",
+            project_id=project_id,
+            entity_id="doc_stub_c",
+            payload={"name": "stub-c"},
+        )
+        single_cancel = self.client.post(f"/api/tasks/{task_c['id']}/cancel")
+        self.assertEqual(single_cancel.status_code, 200, msg=single_cancel.text)
+        self.assertEqual(single_cancel.json()["task"]["status"], "CANCELED")
+
+        single_delete = self.client.delete(f"/api/tasks/{task_c['id']}")
+        self.assertEqual(single_delete.status_code, 200, msg=single_delete.text)
+        self.assertTrue(single_delete.json().get("deleted"))
 
 
 if __name__ == "__main__":

@@ -18,7 +18,9 @@ PROJECT_STATUS = {"DRAFT", "ACTIVE", "ARCHIVED"}
 PARSE_STATUS = {"QUEUED", "RUNNING", "COMPLETED", "FAILED"}
 EXTRACTION_RUN_STATUS = {"QUEUED", "RUNNING", "COMPLETED", "PARTIAL", "FAILED", "CANCELED"}
 REVIEW_STATUS = {"CONFIRMED", "REJECTED", "MANUAL_UPDATED", "MISSING_DATA"}
-TASK_STATUS = {"QUEUED", "RUNNING", "SUCCEEDED", "FAILED"}
+TASK_STATUS = {"QUEUED", "RUNNING", "SUCCEEDED", "FAILED", "CANCELED"}
+ACTIVE_TASK_STATUS = {"QUEUED", "RUNNING"}
+TERMINAL_TASK_STATUS = {"SUCCEEDED", "FAILED", "CANCELED"}
 FALLBACK_REASON = {"NOT_FOUND", "AMBIGUOUS", "PARSER_ERROR", "MODEL_ERROR"}
 EXTRACTION_MODE = {"deterministic", "hybrid", "llm_reasoning"}
 QUALITY_PROFILE = {"high", "balanced", "fast"}
@@ -349,9 +351,16 @@ class LegalReviewService:
         task = self.get_task(task_id)
         if not task:
             return
+        current_status = str(task.get("status") or "QUEUED")
+        next_status = status if status in TASK_STATUS else current_status
+        # Preserve explicit cancellation and prevent terminal tasks from re-entering active states.
+        if current_status == "CANCELED" and next_status != "CANCELED":
+            next_status = "CANCELED"
+        if current_status in {"SUCCEEDED", "FAILED"} and next_status in ACTIVE_TASK_STATUS:
+            next_status = current_status
         updates = {
             "id": task_id,
-            "status": status if status in TASK_STATUS else task["status"],
+            "status": next_status,
             "progress_current": progress_current if progress_current is not None else task.get("progress_current", 0),
             "progress_total": progress_total if progress_total is not None else task.get("progress_total", 0),
             "error_message": error_message,
@@ -382,6 +391,135 @@ class LegalReviewService:
             """,
             {"task_id": task_id},
         )
+
+    def list_tasks(
+        self,
+        *,
+        project_id: str | None = None,
+        statuses: List[str] | None = None,
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        safe_limit = max(1, min(int(limit or 200), 2000))
+        params: Dict[str, Any] = {"limit": safe_limit}
+        clauses: List[str] = []
+        if project_id:
+            clauses.append("project_id=:project_id")
+            params["project_id"] = project_id
+        if statuses is not None:
+            normalized = [status for status in [str(s).upper() for s in statuses] if status in TASK_STATUS]
+            if not normalized:
+                return []
+            tokens: List[str] = []
+            for idx, status in enumerate(normalized):
+                key = f"status_{idx}"
+                tokens.append(f":{key}")
+                params[key] = status
+            clauses.append(f"status IN ({', '.join(tokens)})")
+
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        return self.db.fetch_all(
+            f"""
+            SELECT id, project_id, task_type, status, entity_id, progress_current,
+                   progress_total, error_message, payload_json, created_at, updated_at
+            FROM request_tasks
+            {where}
+            ORDER BY created_at DESC
+            LIMIT :limit
+            """,
+            params,
+        )
+
+    def is_task_canceled(self, task_id: str) -> bool:
+        task = self.get_task(task_id)
+        if not task:
+            return False
+        return str(task.get("status") or "").upper() == "CANCELED"
+
+    def cancel_task(self, task_id: str, *, reason: str | None = None) -> Optional[Dict[str, Any]]:
+        task = self.get_task(task_id)
+        if not task:
+            return None
+
+        status = str(task.get("status") or "")
+        if status in TERMINAL_TASK_STATUS:
+            return task
+
+        message = (reason or "Canceled by user.").strip()
+        self.db.execute(
+            """
+            UPDATE request_tasks
+            SET status='CANCELED',
+                error_message=:error_message,
+                updated_at=:updated_at
+            WHERE id=:task_id
+            """,
+            {
+                "task_id": task_id,
+                "error_message": message,
+                "updated_at": utc_now_iso(),
+            },
+        )
+
+        task_type = str(task.get("task_type") or "")
+        entity_id = task.get("entity_id")
+        if task_type == "EXTRACTION_RUN" and entity_id:
+            self.mark_extraction_run_canceled(str(entity_id), message)
+        elif task_type == "EVALUATION_RUN" and entity_id:
+            self.mark_evaluation_run_canceled(str(entity_id), message)
+
+        if task.get("project_id"):
+            self._audit(
+                project_id=str(task["project_id"]),
+                actor="system",
+                action="task_canceled",
+                entity_type="task",
+                entity_id=task_id,
+                payload={"task_type": task_type, "reason": message},
+            )
+        return self.get_task(task_id)
+
+    def cancel_project_tasks(self, project_id: str, *, reason: str | None = None) -> List[Dict[str, Any]]:
+        tasks = self.list_tasks(project_id=project_id, statuses=sorted(ACTIVE_TASK_STATUS), limit=2000)
+        canceled: List[Dict[str, Any]] = []
+        for task in tasks:
+            item = self.cancel_task(task["id"], reason=reason)
+            if item:
+                canceled.append(item)
+        return canceled
+
+    def delete_task(self, task_id: str, *, force: bool = False) -> bool:
+        task = self.get_task(task_id)
+        if not task:
+            return False
+
+        status = str(task.get("status") or "")
+        if status in ACTIVE_TASK_STATUS:
+            if not force:
+                raise ValueError("Task is still active. Cancel it first or use force=true.")
+            self.cancel_task(task_id, reason="Force-canceled before deletion.")
+
+        self.db.execute("DELETE FROM request_tasks WHERE id=:task_id", {"task_id": task_id})
+        if task.get("project_id"):
+            self._audit(
+                project_id=str(task["project_id"]),
+                actor="system",
+                action="task_deleted",
+                entity_type="task",
+                entity_id=task_id,
+                payload={"forced": bool(force)},
+            )
+        return True
+
+    def delete_tasks(self, task_ids: List[str], *, force: bool = False) -> int:
+        deleted = 0
+        for task_id in task_ids:
+            try:
+                ok = self.delete_task(task_id, force=force)
+            except ValueError:
+                ok = False
+            if ok:
+                deleted += 1
+        return deleted
 
     # Documents
     def create_document(self, *, project_id: str, filename: str, source_mime_type: str, sha256: str) -> Dict[str, Any]:
@@ -769,7 +907,7 @@ class LegalReviewService:
             {"project_id": project_id, "template_version_id": template_version_id},
         )
 
-    def run_extraction(self, run_id: str) -> Dict[str, Any]:
+    def run_extraction(self, run_id: str, task_id: str | None = None) -> Dict[str, Any]:
         run = self.db.fetch_one(
             """
             SELECT id, project_id, template_version_id, mode, quality_profile, status
@@ -780,6 +918,27 @@ class LegalReviewService:
         )
         if not run:
             raise ValueError("Extraction run not found")
+        if str(run.get("status") or "") == "CANCELED":
+            return self.db.fetch_one(
+                """
+                SELECT id, project_id, template_version_id, mode, quality_profile, status, total_cells, completed_cells,
+                       failed_cells, trigger_reason, error_message, created_at, updated_at
+                FROM extraction_runs
+                WHERE id=:run_id
+                """,
+                {"run_id": run_id},
+            ) or {}
+        if task_id and self.is_task_canceled(task_id):
+            self.mark_extraction_run_canceled(run_id, "Canceled before extraction started.")
+            return self.db.fetch_one(
+                """
+                SELECT id, project_id, template_version_id, mode, quality_profile, status, total_cells, completed_cells,
+                       failed_cells, trigger_reason, error_message, created_at, updated_at
+                FROM extraction_runs
+                WHERE id=:run_id
+                """,
+                {"run_id": run_id},
+            ) or {}
 
         template_version = self.get_template_version(run["template_version_id"])
         if not template_version:
@@ -812,6 +971,35 @@ class LegalReviewService:
             doc_version_id = version["id"]
             artifact = version.get("artifact") or {}
             for field in fields:
+                if task_id and self.is_task_canceled(task_id):
+                    self.mark_extraction_run_canceled(
+                        run_id,
+                        "Canceled by user.",
+                        completed_cells=completed,
+                        failed_cells=failed,
+                    )
+                    run_row = self.db.fetch_one(
+                        """
+                        SELECT id, project_id, template_version_id, mode, quality_profile, status, total_cells, completed_cells,
+                               failed_cells, trigger_reason, error_message, created_at, updated_at
+                        FROM extraction_runs
+                        WHERE id=:run_id
+                        """,
+                        {"run_id": run_id},
+                    )
+                    if run_row:
+                        self._audit(
+                            project_id=run_row["project_id"],
+                            actor="system",
+                            action="extraction_run_canceled",
+                            entity_type="extraction_run",
+                            entity_id=run_id,
+                            payload={
+                                "completed_cells": run_row.get("completed_cells", 0),
+                                "failed_cells": run_row.get("failed_cells", 0),
+                            },
+                        )
+                    return run_row or {}
                 result = self._extract_field_cell(
                     field=field,
                     artifact=artifact,
@@ -926,6 +1114,45 @@ class LegalReviewService:
             {
                 "run_id": run_id,
                 "error_message": error_message,
+                "updated_at": utc_now_iso(),
+            },
+        )
+
+    def mark_extraction_run_canceled(
+        self,
+        run_id: str,
+        reason: str | None = None,
+        *,
+        completed_cells: int | None = None,
+        failed_cells: int | None = None,
+    ) -> None:
+        run = self.db.fetch_one(
+            """
+            SELECT id, status, completed_cells, failed_cells
+            FROM extraction_runs
+            WHERE id=:run_id
+            """,
+            {"run_id": run_id},
+        )
+        if not run:
+            return
+        if str(run.get("status") or "") in {"COMPLETED", "PARTIAL", "FAILED", "CANCELED"}:
+            return
+        self.db.execute(
+            """
+            UPDATE extraction_runs
+            SET status='CANCELED',
+                completed_cells=:completed_cells,
+                failed_cells=:failed_cells,
+                error_message=:error_message,
+                updated_at=:updated_at
+            WHERE id=:run_id
+            """,
+            {
+                "run_id": run_id,
+                "completed_cells": completed_cells if completed_cells is not None else int(run.get("completed_cells") or 0),
+                "failed_cells": failed_cells if failed_cells is not None else int(run.get("failed_cells") or 0),
+                "error_message": (reason or "Canceled by user.").strip(),
                 "updated_at": utc_now_iso(),
             },
         )
@@ -1611,7 +1838,7 @@ class LegalReviewService:
             {"project_id": project_id, "eval_run_id": eval_run_id},
         )
 
-    def run_evaluation(self, eval_run_id: str) -> Dict[str, Any]:
+    def run_evaluation(self, eval_run_id: str, task_id: str | None = None) -> Dict[str, Any]:
         run = self.db.fetch_one(
             """
             SELECT id, project_id, ground_truth_set_id, extraction_run_id
@@ -1622,6 +1849,9 @@ class LegalReviewService:
         )
         if not run:
             raise ValueError("Evaluation run not found")
+        if task_id and self.is_task_canceled(task_id):
+            self.mark_evaluation_run_canceled(eval_run_id, "Canceled before evaluation started.")
+            return self.get_evaluation_run(run["project_id"], eval_run_id) or {}
 
         self.db.execute(
             """
@@ -1660,6 +1890,9 @@ class LegalReviewService:
         mismatches: List[str] = []
 
         for label in labels:
+            if task_id and self.is_task_canceled(task_id):
+                self.mark_evaluation_run_canceled(eval_run_id, "Canceled by user during evaluation.")
+                return self.get_evaluation_run(run["project_id"], eval_run_id) or {}
             key = (label["document_version_id"], label["field_key"])
             extracted = ext_map.get(key)
             if extracted and _normalize_space(extracted.get("value") or ""):
@@ -1734,6 +1967,34 @@ class LegalReviewService:
             {
                 "eval_run_id": eval_run_id,
                 "notes": error_message,
+                "updated_at": utc_now_iso(),
+            },
+        )
+
+    def mark_evaluation_run_canceled(self, eval_run_id: str, reason: str | None = None) -> None:
+        run = self.db.fetch_one(
+            """
+            SELECT id, status
+            FROM evaluation_runs
+            WHERE id=:eval_run_id
+            """,
+            {"eval_run_id": eval_run_id},
+        )
+        if not run:
+            return
+        if str(run.get("status") or "") in {"COMPLETED", "FAILED", "CANCELED"}:
+            return
+        self.db.execute(
+            """
+            UPDATE evaluation_runs
+            SET status='CANCELED',
+                notes=:notes,
+                updated_at=:updated_at
+            WHERE id=:eval_run_id
+            """,
+            {
+                "eval_run_id": eval_run_id,
+                "notes": (reason or "Canceled by user.").strip(),
                 "updated_at": utc_now_iso(),
             },
         )

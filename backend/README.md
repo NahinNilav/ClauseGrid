@@ -32,6 +32,10 @@ Workflow API
 - `GET /api/projects/{project_id}/evaluation-runs/{eval_run_id}`
 - `POST /api/projects/{project_id}/annotations`
 - `GET /api/projects/{project_id}/annotations`
+- `GET /api/projects/{project_id}/tasks`
+- `POST /api/projects/{project_id}/tasks/cancel-pending`
+- `POST /api/tasks/{task_id}/cancel`
+- `DELETE /api/tasks/{task_id}`
 - `GET /api/tasks/{task_id}`
 
 Legacy/Parser APIs
