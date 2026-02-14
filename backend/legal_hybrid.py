@@ -166,6 +166,12 @@ class GeminiLegalClient:
 
     @staticmethod
     def _thinking_level(quality_profile: str, model: str) -> str:
+        """Map quality profile to Gemini thinking_level.
+
+        Per official Gemini 3 docs:
+          - Pro supports:  low, high (default)
+          - Flash supports: minimal, low, medium, high (default)
+        """
         profile = (quality_profile or "high").lower()
         is_flash = "flash" in (model or "").lower()
         if profile == "fast":
@@ -387,6 +393,7 @@ class GeminiLegalClient:
         value: str,
         raw_text: str,
         candidates: List[Dict[str, Any]],
+        quality_profile: str = "high",
     ) -> Dict[str, Any]:
         evidence = []
         for idx, candidate in enumerate(candidates):
@@ -417,7 +424,7 @@ class GeminiLegalClient:
             operation="verify",
             model=self.verifier_model,
             prompt=prompt,
-            quality_profile="high",
+            quality_profile=quality_profile,
             response_schema=response_schema,
         )
         payload = self._extract_json_object(text)

@@ -1335,6 +1335,7 @@ class LegalReviewService:
                 value=primary.get("value") or "",
                 raw_text=primary.get("raw_text") or "",
                 candidates=candidates,
+                quality_profile=quality_profile,
             )
 
             if verifier.get("verifier_status") == "FAIL":
@@ -1353,6 +1354,7 @@ class LegalReviewService:
                         value=primary.get("value") or "",
                         raw_text=primary.get("raw_text") or "",
                         candidates=candidates,
+                        quality_profile=quality_profile,
                     )
 
             self_consistent = True
