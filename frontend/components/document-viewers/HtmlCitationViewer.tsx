@@ -126,6 +126,18 @@ export const HtmlCitationViewer: React.FC<HtmlCitationViewerProps> = ({ previewH
         const style = doc.createElement('style');
         style.id = STYLE_ID;
         style.textContent = `
+          html, body {
+            width: 100% !important;
+            max-width: none !important;
+            margin: 0 !important;
+            padding: 20px !important;
+            box-sizing: border-box !important;
+          }
+          body > * {
+            max-width: none !important;
+            margin-left: 0 !important;
+            margin-right: 0 !important;
+          }
           .citation-block-highlight {
             background: rgba(216, 220, 229, 0.65);
             outline: 2px solid #8B97AD;
@@ -232,7 +244,7 @@ export const HtmlCitationViewer: React.FC<HtmlCitationViewerProps> = ({ previewH
   }, [srcDoc, primaryCitation?.selector, primaryCitation?.snippet, primaryCitation?.start_char, primaryCitation?.end_char]);
 
   return (
-    <div className="h-full overflow-hidden bg-[#E5E7EB] p-6">
+    <div className="h-full overflow-hidden bg-[#E5E7EB] p-4 md:p-6">
       <div className="w-full h-full bg-white rounded-xl shadow-card overflow-hidden">
         <iframe
           ref={iframeRef}

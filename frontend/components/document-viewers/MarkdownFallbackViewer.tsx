@@ -78,8 +78,8 @@ export const MarkdownFallbackViewer: React.FC<MarkdownFallbackViewerProps> = ({
   }, [highlightedParts.hasMatch, cell?.citations]);
 
   return (
-    <div ref={scrollContainerRef} className="h-full overflow-auto p-8 md:p-12 scroll-smooth">
-      <div className="max-w-[800px] w-full bg-white shadow-card min-h-[800px] p-8 md:p-12 relative mx-auto text-left rounded-xl whitespace-pre-wrap text-sm leading-relaxed text-[#333333]">
+    <div ref={scrollContainerRef} className="h-full overflow-auto p-4 md:p-6 scroll-smooth">
+      <div className="w-full bg-white shadow-card min-h-[800px] p-6 md:p-8 relative text-left rounded-xl whitespace-pre-wrap text-sm leading-relaxed text-[#333333]">
         {fallbackReason && (
           <div className="bg-[#F5F4F0] border border-[#E5E7EB] rounded-lg p-2 mb-4 text-xs text-[#8A8470]">
             {fallbackReason}

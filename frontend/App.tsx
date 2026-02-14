@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from './services/legalReviewApi';
 import {
   AIFieldExtraction,
@@ -12,7 +12,7 @@ import {
   TemplateFieldDefinition,
 } from './types';
 import { DocumentViewer } from './components/document-viewers';
-import { Trash2, FolderOpen, ChevronRight, ChevronLeft, X } from './components/Icons';
+import { Trash2, FolderOpen, ChevronRight, ChevronLeft, X, GripVertical, ZoomIn, ZoomOut, Maximize2, ChevronUp, ChevronDown, FileText } from './components/Icons';
 
 const REVIEW_STATUSES: ReviewStatus[] = [
   'CONFIRMED',
@@ -183,6 +183,48 @@ const App: React.FC = () => {
   const [showUnresolvedOnly, setShowUnresolvedOnly] = useState<boolean>(false);
   const [showLowConfidenceOnly, setShowLowConfidenceOnly] = useState<boolean>(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
+  const [reviewPanelWidth, setReviewPanelWidth] = useState<number>(380);
+  const [viewerPanelWidth, setViewerPanelWidth] = useState<number>(480);
+  const [viewerZoom, setViewerZoom] = useState<number>(100);
+  const isDraggingDivider = useRef<'review' | 'viewer' | null>(null);
+  const dragStartX = useRef<number>(0);
+  const dragStartWidth = useRef<number>(0);
+
+  const handleDividerMouseDown = useCallback((e: React.MouseEvent, panel: 'review' | 'viewer') => {
+    e.preventDefault();
+    isDraggingDivider.current = panel;
+    dragStartX.current = e.clientX;
+    dragStartWidth.current = panel === 'review' ? reviewPanelWidth : viewerPanelWidth;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      if (!isDraggingDivider.current) return;
+      const diff = isDraggingDivider.current === 'review'
+        ? dragStartX.current - moveEvent.clientX // review panel: dragging left grows
+        : moveEvent.clientX - dragStartX.current; // viewer panel: dragging right grows — but we need inverse since it's on the right
+      const actualDiff = isDraggingDivider.current === 'viewer'
+        ? dragStartX.current - moveEvent.clientX
+        : diff;
+      const newWidth = Math.max(280, Math.min(600, dragStartWidth.current + actualDiff));
+      if (isDraggingDivider.current === 'review') {
+        setReviewPanelWidth(newWidth);
+      } else {
+        setViewerPanelWidth(newWidth);
+      }
+    };
+
+    const handleMouseUp = () => {
+      isDraggingDivider.current = null;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  }, [reviewPanelWidth, viewerPanelWidth]);
 
   const selectedCell = useMemo(() => {
     if (!tableView || !selectedRowVersionId || !selectedFieldKey) return null;
@@ -1006,9 +1048,9 @@ const App: React.FC = () => {
               )}
 
               {tab === 'table' && (
-                <section className="h-full relative">
-                  {/* Full-width table */}
-                  <div className="h-full flex flex-col bg-white border border-[#E5E7EB] rounded-xl overflow-hidden">
+                <section className="h-full flex">
+                  {/* Table Panel */}
+                  <div className="flex-1 min-w-0 flex flex-col bg-white border border-[#E5E7EB] rounded-xl overflow-hidden">
                     {/* Toolbar */}
                     <div className="border-b border-[#E5E7EB] bg-[#FAFAF7]">
                       <div className="flex items-center justify-between px-4 py-2.5 gap-3">
@@ -1098,7 +1140,12 @@ const App: React.FC = () => {
                       <table className="w-full text-sm border-collapse">
                         <thead className="bg-[#FAFAF7] sticky top-0 z-10">
                           <tr>
-                            <th className="text-left px-4 py-3 text-[10px] font-semibold uppercase tracking-[0.1em] text-[#8A8470] sticky left-0 bg-[#FAFAF7] w-48">Document</th>
+                            <th className="text-left px-4 py-3 text-[10px] font-semibold uppercase tracking-[0.1em] text-[#8A8470] sticky left-0 bg-[#FAFAF7] w-48 border-r-2 border-[#E5E7EB]">
+                              <span className="flex items-center gap-1.5">
+                                <FileText className="w-3 h-3" />
+                                Document
+                              </span>
+                            </th>
                             {(tableView?.columns || []).map((col) => (
                               <th key={col.key} className="text-left px-4 py-3 text-[10px] font-semibold uppercase tracking-[0.1em] text-[#8A8470] min-w-[220px]">{col.name}</th>
                             ))}
@@ -1107,7 +1154,7 @@ const App: React.FC = () => {
                         <tbody>
                           {displayRows.map((row) => (
                             <tr key={row.document_version_id} className="border-t border-[#F0F0EC] hover:bg-[#FAFAF7]/50 transition-colors">
-                              <td className="px-4 py-3 sticky left-0 bg-white text-xs font-semibold w-48">{row.filename}</td>
+                              <td className="px-4 py-3 sticky left-0 bg-white text-xs font-semibold w-48 border-r-2 border-[#E5E7EB]">{row.filename}</td>
                               {(tableView?.columns || []).map((col) => {
                                 const cell = row.cells[col.key];
                                 const selected = selectedCell?.row.document_version_id === row.document_version_id && selectedCell?.cell.field_key === col.key;
@@ -1160,121 +1207,199 @@ const App: React.FC = () => {
                     </div>
                   </div>
 
-                  {/* Review & Audit Panel - slides in from right when a cell is selected */}
+                  {/* Side panels when a cell is selected */}
                   {selectedCell && (
-                    <div className="absolute top-0 right-0 h-full w-[440px] bg-white border-l border-[#E5E7EB] shadow-2xl flex flex-col z-30 animate-in slide-in-from-right duration-200">
-                      <div className="px-4 py-3 border-b border-[#E5E7EB] flex items-center justify-between bg-[#FAFAF7]">
-                        <div>
-                          <h3 className="font-semibold text-sm">Review & Audit</h3>
-                          <p className="text-[10px] text-[#8A8470] mt-0.5">{selectedCell.row.filename} &middot; {selectedCell.cell.field_key}</p>
+                    <>
+                      {/* Draggable Divider: Table | Review */}
+                      <div
+                        className="w-[6px] flex-shrink-0 cursor-col-resize group relative hover:bg-[#4A5A7B]/10 transition-colors flex items-center justify-center"
+                        onMouseDown={(e) => handleDividerMouseDown(e, 'review')}
+                        title="Drag to resize"
+                      >
+                        <div className="w-[2px] h-full bg-[#E5E7EB] group-hover:bg-[#4A5A7B] transition-colors" />
+                        <div className="absolute inset-y-0 flex items-center">
+                          <GripVertical className="w-3 h-3 text-[#C4BFB3] group-hover:text-[#4A5A7B] transition-colors" />
                         </div>
-                        <button
-                          onClick={() => { setSelectedRowVersionId(null); setSelectedFieldKey(null); }}
-                          className="p-1.5 rounded-lg hover:bg-[#E5E7EB] text-[#8A8470] hover:text-[#333] transition-colors"
-                          title="Close panel"
-                        >
-                          <X className="w-4 h-4" />
-                        </button>
                       </div>
 
-                      <div className="flex-1 overflow-auto p-4 space-y-4">
-                        <div className="border border-[#E5E7EB] rounded-xl p-3 bg-[#FAFAF7]">
-                          <div className="text-[10px] font-semibold uppercase tracking-[0.1em] text-[#8A8470] mb-2">AI Result</div>
-                          <div className="text-sm text-[#1C1C1C] leading-relaxed">{selectedCell.cell.ai_result?.value || '-'}</div>
-                          <div className="text-xs text-[#6B6555] mt-2 leading-relaxed">{selectedCell.cell.ai_result?.evidence_summary || 'No evidence summary.'}</div>
-                          <div className="mt-3 flex flex-wrap gap-1.5 text-[10px]">
-                            {selectedCell.cell.ai_result?.extraction_method && (
-                              <span className="px-2 py-0.5 rounded-full bg-[#E8EEF8] text-[#304A7A] font-medium">
-                                {selectedCell.cell.ai_result.extraction_method}
-                              </span>
-                            )}
-                            {selectedCell.cell.ai_result?.verifier_status && selectedCell.cell.ai_result.verifier_status !== 'SKIPPED' && (
-                              <span className="px-2 py-0.5 rounded-full bg-[#F5F4F0] text-[#6B6555] font-medium">
-                                verifier: {selectedCell.cell.ai_result.verifier_status}
-                              </span>
-                            )}
-                            <span className="px-2 py-0.5 rounded-full bg-[#F5F4F0] text-[#6B6555] font-medium">
-                              conf: {(selectedCell.cell.ai_result?.confidence_score || 0).toFixed(3)}
-                            </span>
+                      {/* Review & Audit Panel */}
+                      <div
+                        className="flex-shrink-0 flex flex-col bg-white border border-[#E5E7EB] rounded-xl overflow-hidden"
+                        style={{ width: reviewPanelWidth }}
+                      >
+                        <div className="px-4 py-2.5 border-b border-[#E5E7EB] flex items-center justify-between bg-[#FAFAF7]">
+                          <div className="min-w-0">
+                            <h3 className="font-semibold text-sm">Review & Audit</h3>
+                            <p className="text-[10px] text-[#8A8470] mt-0.5 truncate">{selectedCell.row.filename} &middot; {selectedCell.cell.field_key}</p>
                           </div>
-                          {selectedCell.cell.ai_result?.uncertainty_reason && (
-                            <div className="text-[11px] text-[#8A3B00] mt-2 bg-[#FBE7D8] rounded-lg px-2 py-1">
-                              {selectedCell.cell.ai_result.uncertainty_reason}
-                            </div>
-                          )}
-                        </div>
-
-                        <div className="space-y-3">
-                          <label className="text-xs block">
-                            <span className="block text-[10px] font-semibold text-[#8A8470] uppercase tracking-wider mb-1.5">Review Status</span>
-                            <select
-                              value={reviewStatus}
-                              onChange={(e) => setReviewStatus(e.target.value as ReviewStatus)}
-                              className="w-full border border-[#E5E7EB] rounded-lg px-3 py-2 text-sm focus:ring-1 focus:ring-[#4A5A7B] focus:border-[#4A5A7B] outline-none"
-                            >
-                              {REVIEW_STATUSES.map((status) => (
-                                <option key={status} value={status}>{status}</option>
-                              ))}
-                            </select>
-                          </label>
-
-                          <label className="text-xs block">
-                            <span className="block text-[10px] font-semibold text-[#8A8470] uppercase tracking-wider mb-1.5">Manual Value</span>
-                            <textarea
-                              value={manualValue}
-                              onChange={(e) => setManualValue(e.target.value)}
-                              className="w-full border border-[#E5E7EB] rounded-lg px-3 py-2 text-sm min-h-[80px] focus:ring-1 focus:ring-[#4A5A7B] focus:border-[#4A5A7B] outline-none resize-y"
-                            />
-                          </label>
-
-                          <div className="grid grid-cols-2 gap-3">
-                            <label className="text-xs block">
-                              <span className="block text-[10px] font-semibold text-[#8A8470] uppercase tracking-wider mb-1.5">Reviewer</span>
-                              <input
-                                value={reviewer}
-                                onChange={(e) => setReviewer(e.target.value)}
-                                className="w-full border border-[#E5E7EB] rounded-lg px-3 py-2 text-sm focus:ring-1 focus:ring-[#4A5A7B] focus:border-[#4A5A7B] outline-none"
-                              />
-                            </label>
-
-                            <label className="text-xs block">
-                              <span className="block text-[10px] font-semibold text-[#8A8470] uppercase tracking-wider mb-1.5">Notes</span>
-                              <input
-                                value={reviewNotes}
-                                onChange={(e) => setReviewNotes(e.target.value)}
-                                className="w-full border border-[#E5E7EB] rounded-lg px-3 py-2 text-sm focus:ring-1 focus:ring-[#4A5A7B] focus:border-[#4A5A7B] outline-none"
-                              />
-                            </label>
-                          </div>
-                        </div>
-
-                        <button onClick={saveReview} className="w-full px-4 py-2.5 rounded-lg bg-[#1C1C1C] text-white text-xs font-semibold hover:bg-[#333] transition-colors">
-                          Save Review Decision
-                        </button>
-
-                        <div className="border-t border-[#E5E7EB] pt-4">
-                          <div className="text-[10px] font-semibold text-[#8A8470] uppercase tracking-wider mb-2">Annotation</div>
-                          <textarea
-                            value={annotationBody}
-                            onChange={(e) => setAnnotationBody(e.target.value)}
-                            className="w-full border border-[#E5E7EB] rounded-lg px-3 py-2 text-sm min-h-[60px] focus:ring-1 focus:ring-[#4A5A7B] focus:border-[#4A5A7B] outline-none resize-y"
-                            placeholder="Comment tied to this field/document"
-                          />
-                          <button onClick={addAnnotation} className="mt-2 w-full px-4 py-2.5 rounded-lg bg-[#4A5A7B] text-white text-xs font-semibold hover:bg-[#3D4D6A] transition-colors">
-                            Add Annotation
+                          <button
+                            onClick={() => { setSelectedRowVersionId(null); setSelectedFieldKey(null); }}
+                            className="p-1.5 rounded-lg hover:bg-[#E5E7EB] text-[#8A8470] hover:text-[#333] transition-colors flex-shrink-0"
+                            title="Close panel"
+                          >
+                            <X className="w-4 h-4" />
                           </button>
                         </div>
 
-                        {selectedViewerDocument && (
-                          <div className="border-t border-[#E5E7EB] pt-4">
-                            <div className="text-[10px] font-semibold text-[#8A8470] uppercase tracking-wider mb-2">Citation Viewer</div>
-                            <div className="h-[360px] border border-[#E5E7EB] rounded-lg overflow-hidden bg-[#F5F4F0]">
-                              <DocumentViewer document={selectedViewerDocument} cell={selectedViewerCell} />
+                        <div className="flex-1 overflow-auto p-3 space-y-3">
+                          <div className="border border-[#E5E7EB] rounded-xl p-3 bg-[#FAFAF7]">
+                            <div className="text-[10px] font-semibold uppercase tracking-[0.1em] text-[#8A8470] mb-1.5">AI Result</div>
+                            <div className="text-sm text-[#1C1C1C] leading-relaxed">{selectedCell.cell.ai_result?.value || '-'}</div>
+                            <div className="text-xs text-[#6B6555] mt-1.5 leading-relaxed">{selectedCell.cell.ai_result?.evidence_summary || 'No evidence summary.'}</div>
+                            <div className="mt-2 flex flex-wrap gap-1 text-[10px]">
+                              {selectedCell.cell.ai_result?.extraction_method && (
+                                <span className="px-2 py-0.5 rounded-full bg-[#E8EEF8] text-[#304A7A] font-medium">
+                                  {selectedCell.cell.ai_result.extraction_method}
+                                </span>
+                              )}
+                              {selectedCell.cell.ai_result?.verifier_status && selectedCell.cell.ai_result.verifier_status !== 'SKIPPED' && (
+                                <span className="px-2 py-0.5 rounded-full bg-[#F5F4F0] text-[#6B6555] font-medium">
+                                  verifier: {selectedCell.cell.ai_result.verifier_status}
+                                </span>
+                              )}
+                              <span className="px-2 py-0.5 rounded-full bg-[#F5F4F0] text-[#6B6555] font-medium">
+                                conf: {(selectedCell.cell.ai_result?.confidence_score || 0).toFixed(3)}
+                              </span>
+                            </div>
+                            {selectedCell.cell.ai_result?.uncertainty_reason && (
+                              <div className="text-[11px] text-[#8A3B00] mt-2 bg-[#FBE7D8] rounded-lg px-2 py-1">
+                                {selectedCell.cell.ai_result.uncertainty_reason}
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="space-y-2.5">
+                            <label className="text-xs block">
+                              <span className="block text-[10px] font-semibold text-[#8A8470] uppercase tracking-wider mb-1">Review Status</span>
+                              <select
+                                value={reviewStatus}
+                                onChange={(e) => setReviewStatus(e.target.value as ReviewStatus)}
+                                className="w-full border border-[#E5E7EB] rounded-lg px-3 py-1.5 text-sm focus:ring-1 focus:ring-[#4A5A7B] focus:border-[#4A5A7B] outline-none"
+                              >
+                                {REVIEW_STATUSES.map((status) => (
+                                  <option key={status} value={status}>{status}</option>
+                                ))}
+                              </select>
+                            </label>
+
+                            <label className="text-xs block">
+                              <span className="block text-[10px] font-semibold text-[#8A8470] uppercase tracking-wider mb-1">Manual Value</span>
+                              <textarea
+                                value={manualValue}
+                                onChange={(e) => setManualValue(e.target.value)}
+                                className="w-full border border-[#E5E7EB] rounded-lg px-3 py-1.5 text-sm min-h-[60px] focus:ring-1 focus:ring-[#4A5A7B] focus:border-[#4A5A7B] outline-none resize-y"
+                              />
+                            </label>
+
+                            <div className="grid grid-cols-2 gap-2">
+                              <label className="text-xs block">
+                                <span className="block text-[10px] font-semibold text-[#8A8470] uppercase tracking-wider mb-1">Reviewer</span>
+                                <input
+                                  value={reviewer}
+                                  onChange={(e) => setReviewer(e.target.value)}
+                                  className="w-full border border-[#E5E7EB] rounded-lg px-3 py-1.5 text-sm focus:ring-1 focus:ring-[#4A5A7B] focus:border-[#4A5A7B] outline-none"
+                                />
+                              </label>
+                              <label className="text-xs block">
+                                <span className="block text-[10px] font-semibold text-[#8A8470] uppercase tracking-wider mb-1">Notes</span>
+                                <input
+                                  value={reviewNotes}
+                                  onChange={(e) => setReviewNotes(e.target.value)}
+                                  className="w-full border border-[#E5E7EB] rounded-lg px-3 py-1.5 text-sm focus:ring-1 focus:ring-[#4A5A7B] focus:border-[#4A5A7B] outline-none"
+                                />
+                              </label>
                             </div>
                           </div>
-                        )}
+
+                          <button onClick={saveReview} className="w-full px-4 py-2 rounded-lg bg-[#1C1C1C] text-white text-xs font-semibold hover:bg-[#333] transition-colors">
+                            Save Review Decision
+                          </button>
+
+                          <div className="border-t border-[#E5E7EB] pt-3">
+                            <div className="text-[10px] font-semibold text-[#8A8470] uppercase tracking-wider mb-1.5">Annotation</div>
+                            <textarea
+                              value={annotationBody}
+                              onChange={(e) => setAnnotationBody(e.target.value)}
+                              className="w-full border border-[#E5E7EB] rounded-lg px-3 py-1.5 text-sm min-h-[50px] focus:ring-1 focus:ring-[#4A5A7B] focus:border-[#4A5A7B] outline-none resize-y"
+                              placeholder="Comment tied to this field/document"
+                            />
+                            <button onClick={addAnnotation} className="mt-1.5 w-full px-4 py-2 rounded-lg bg-[#4A5A7B] text-white text-xs font-semibold hover:bg-[#3D4D6A] transition-colors">
+                              Add Annotation
+                            </button>
+                          </div>
+                        </div>
                       </div>
-                    </div>
+
+                      {/* Draggable Divider: Review | Viewer */}
+                      <div
+                        className="w-[6px] flex-shrink-0 cursor-col-resize group relative hover:bg-[#4A5A7B]/10 transition-colors flex items-center justify-center"
+                        onMouseDown={(e) => handleDividerMouseDown(e, 'viewer')}
+                        title="Drag to resize"
+                      >
+                        <div className="w-[2px] h-full bg-[#E5E7EB] group-hover:bg-[#4A5A7B] transition-colors" />
+                        <div className="absolute inset-y-0 flex items-center">
+                          <GripVertical className="w-3 h-3 text-[#C4BFB3] group-hover:text-[#4A5A7B] transition-colors" />
+                        </div>
+                      </div>
+
+                      {/* Citation / Document Viewer Panel */}
+                      <div
+                        className="flex-shrink-0 flex flex-col bg-white border border-[#E5E7EB] rounded-xl overflow-hidden"
+                        style={{ width: viewerPanelWidth }}
+                      >
+                        <div className="px-4 py-2.5 border-b border-[#E5E7EB] flex items-center justify-between bg-[#FAFAF7]">
+                          <div className="min-w-0">
+                            <h3 className="font-semibold text-sm">Document Viewer</h3>
+                            <p className="text-[10px] text-[#8A8470] mt-0.5 truncate">{selectedCell.row.filename}</p>
+                          </div>
+                          {/* Viewer Controls */}
+                          <div className="flex items-center gap-1 flex-shrink-0">
+                            <button
+                              onClick={() => setViewerZoom((z) => Math.max(50, z - 15))}
+                              className="p-1.5 rounded-lg hover:bg-[#E5E7EB] text-[#8A8470] hover:text-[#333] transition-colors"
+                              title="Zoom Out"
+                            >
+                              <ZoomOut className="w-3.5 h-3.5" />
+                            </button>
+                            <span className="text-[10px] font-semibold text-[#8A8470] min-w-[36px] text-center tabular-nums">{viewerZoom}%</span>
+                            <button
+                              onClick={() => setViewerZoom((z) => Math.min(200, z + 15))}
+                              className="p-1.5 rounded-lg hover:bg-[#E5E7EB] text-[#8A8470] hover:text-[#333] transition-colors"
+                              title="Zoom In"
+                            >
+                              <ZoomIn className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={() => setViewerZoom(100)}
+                              className="p-1.5 rounded-lg hover:bg-[#E5E7EB] text-[#8A8470] hover:text-[#333] transition-colors"
+                              title="Fit to Width"
+                            >
+                              <Maximize2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                        <div className="flex-1 overflow-auto bg-[#F5F4F0]">
+                          {selectedViewerDocument ? (
+                            <div
+                              className="h-full"
+                              style={{
+                                transform: `scale(${viewerZoom / 100})`,
+                                transformOrigin: 'top left',
+                                width: `${10000 / viewerZoom}%`,
+                                minHeight: '100%',
+                                height: '100%',
+                              }}
+                            >
+                              <DocumentViewer document={selectedViewerDocument} cell={selectedViewerCell} />
+                            </div>
+                          ) : (
+                            <div className="h-full flex items-center justify-center text-xs text-[#8A8470]">
+                              No document preview available.
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </>
                   )}
                 </section>
               )}

@@ -7,6 +7,8 @@ import {
   X, 
   ChevronRight,
   ChevronLeft,
+  ChevronUp,
+  ChevronDown,
   Loader2,
   Search,
   CheckCircle2,
@@ -22,7 +24,6 @@ import {
   Square,
   LayoutTemplate,
   FilePlus,
-  ChevronDown,
   Zap,
   Brain,
   Cpu,
@@ -41,7 +42,11 @@ import {
   FolderOpen,
   Library,
   RotateCcw,
-  RefreshCw
+  RefreshCw,
+  ZoomIn,
+  ZoomOut,
+  Maximize2,
+  GripVertical
 } from 'lucide-react';
 
 export { 
@@ -51,7 +56,9 @@ export {
   MessageSquare, 
   X, 
   ChevronRight,
-  ChevronLeft, 
+  ChevronLeft,
+  ChevronUp,
+  ChevronDown,
   Loader2,
   Search,
   CheckCircle2,
@@ -67,7 +74,6 @@ export {
   Square,
   LayoutTemplate,
   FilePlus,
-  ChevronDown,
   Zap,
   Brain,
   Cpu,
@@ -86,5 +92,9 @@ export {
   FolderOpen,
   Library,
   RotateCcw,
-  RefreshCw
+  RefreshCw,
+  ZoomIn,
+  ZoomOut,
+  Maximize2,
+  GripVertical
 };

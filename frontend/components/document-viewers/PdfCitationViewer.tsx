@@ -226,8 +226,8 @@ export const PdfCitationViewer: React.FC<PdfCitationViewerProps> = ({
   const pageCount = renderedPage?.page_count || 1;
 
   return (
-    <div ref={scrollContainerRef} className="h-full overflow-auto p-8 md:p-12 bg-[#E5E7EB] scroll-smooth">
-      <div className="max-w-[900px] w-full mx-auto space-y-3">
+    <div ref={scrollContainerRef} className="h-full overflow-auto p-4 md:p-6 bg-[#E5E7EB] scroll-smooth">
+      <div className="w-full space-y-3">
         <div className="flex items-center justify-between text-xs text-[#8A8470]">
           <span>Rendered PDF Evidence</span>
           <div className="flex items-center gap-2">
