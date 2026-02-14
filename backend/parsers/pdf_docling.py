@@ -43,6 +43,25 @@ def _bbox_for_char_range(text_page, start_char: int, end_char: int, max_chars: i
     return _union_bboxes(bboxes)
 
 
+def _page_index_from_pdfium(pdf_path: str) -> Dict[str, Dict[str, float]]:
+    page_index: Dict[str, Dict[str, float]] = {}
+    pdf = pdfium.PdfDocument(pdf_path)
+    try:
+        for page_no in range(1, len(pdf) + 1):
+            page = pdf[page_no - 1]
+            try:
+                width, height = page.get_size()
+            finally:
+                page.close()
+            page_index[str(page_no)] = {
+                "width": float(width),
+                "height": float(height),
+            }
+    finally:
+        pdf.close()
+    return page_index
+
+
 def _blocks_from_pdfium(pdf_path: str) -> Dict[str, Any]:
     pdf = pdfium.PdfDocument(pdf_path)
 
@@ -154,6 +173,7 @@ def parse_pdf(
     *,
     pdf_path: str,
 ) -> Dict[str, Any]:
+    page_index = _page_index_from_pdfium(pdf_path)
     payload, worker_error = _run_docling_pdf_worker(pdf_path)
 
     if payload:
@@ -170,6 +190,7 @@ def parse_pdf(
             if not has_page_citations:
                 fallback = _blocks_from_pdfium(pdf_path)
                 fallback["worker_error"] = "docling_returned_blocks_without_page_citations"
+                fallback["page_index"] = page_index
                 return fallback
 
             return {
@@ -178,8 +199,10 @@ def parse_pdf(
                 "blocks": blocks,
                 "parser": "docling",
                 "worker_error": None,
+                "page_index": page_index,
             }
 
     fallback = _blocks_from_pdfium(pdf_path)
     fallback["worker_error"] = worker_error
+    fallback["page_index"] = page_index
     return fallback

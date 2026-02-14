@@ -71,9 +71,10 @@ def make_artifact(
     blocks: List[Block],
     chunks: List[Chunk],
     citation_index: Dict[str, Dict[str, Any]],
+    preview_html: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    return {
+    payload = {
         "doc_version_id": doc_version_id,
         "format": doc_format,
         "filename": filename,
@@ -87,6 +88,9 @@ def make_artifact(
         "citation_index": citation_index,
         "metadata": metadata or {},
     }
+    if preview_html:
+        payload["preview_html"] = preview_html
+    return payload
 
 
 def build_citation_index(blocks: List[Block]) -> Dict[str, Dict[str, Any]]:

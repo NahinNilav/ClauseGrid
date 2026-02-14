@@ -1,5 +1,5 @@
 import { GoogleGenAI, Type, Schema } from "@google/genai";
-import { DocumentFile, ExtractionCell, Column, ExtractionResult } from "../types";
+import { DocumentFile, ExtractionCell, Column, ExtractionResult, ArtifactBlock, SourceCitation } from "../types";
 import { logRuntimeEvent } from "./runtimeLogger";
 
 // Initialize Gemini Client
@@ -95,6 +95,100 @@ const extractionSchema: Schema = {
   required: ["value", "confidence", "quote", "reasoning"],
 };
 
+const normalizeText = (value: string): string =>
+  value
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/[^\w\s]/g, " ")
+    .trim();
+
+const tokenize = (value: string): string[] =>
+  normalizeText(value)
+    .split(" ")
+    .filter((token) => token.length > 2);
+
+const overlapScore = (left: string, right: string): number => {
+  const a = new Set(tokenize(left));
+  const b = new Set(tokenize(right));
+  if (!a.size || !b.size) return 0;
+  let shared = 0;
+  for (const token of a) {
+    if (b.has(token)) shared += 1;
+  }
+  return shared / Math.max(a.size, b.size);
+};
+
+const pickBestArtifactBlock = (
+  blocks: ArtifactBlock[],
+  value: string,
+  quote: string
+): ArtifactBlock | null => {
+  if (!blocks.length) return null;
+
+  const probes = [quote, value].map((v) => v.trim()).filter(Boolean);
+  if (!probes.length) return null;
+
+  let bestBlock: ArtifactBlock | null = null;
+  let bestScore = 0;
+
+  for (const block of blocks) {
+    if (!block.text) continue;
+    const normBlock = normalizeText(block.text);
+    let score = 0;
+
+    for (const probe of probes) {
+      const normProbe = normalizeText(probe);
+      if (!normProbe) continue;
+
+      if (normBlock.includes(normProbe)) {
+        score += 2.5;
+      } else {
+        score += overlapScore(block.text, probe);
+      }
+    }
+
+    if (block.citations?.length) {
+      score += 0.2;
+    }
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestBlock = block;
+    }
+  }
+
+  return bestScore >= 0.35 ? bestBlock : null;
+};
+
+const resolveCitationsFromArtifact = (
+  doc: DocumentFile,
+  extractedValue: string,
+  extractedQuote: string,
+  fallbackPage: number
+): { quote: string; page: number; citations: SourceCitation[] } => {
+  const artifact = doc.artifact;
+  if (!artifact?.blocks?.length) {
+    return { quote: extractedQuote, page: fallbackPage, citations: [] };
+  }
+
+  const bestBlock = pickBestArtifactBlock(artifact.blocks, extractedValue, extractedQuote);
+  if (!bestBlock) {
+    return { quote: extractedQuote, page: fallbackPage, citations: [] };
+  }
+
+  const citations = (bestBlock.citations || []).filter((citation) => Boolean(citation.snippet));
+  const primary = citations[0];
+
+  const resolvedQuote = primary?.snippet?.trim() || extractedQuote || bestBlock.text.slice(0, 220);
+  const resolvedPage = primary?.page || fallbackPage || 1;
+
+  return {
+    quote: resolvedQuote,
+    page: resolvedPage,
+    citations,
+  };
+};
+
 export const extractColumnData = async (
   doc: DocumentFile,
   column: Column,
@@ -170,13 +264,23 @@ export const extractColumnData = async (
       }
 
       const json = JSON.parse(responseText);
+      const extractedValue = String(json.value || "");
+      const extractedQuote = String(json.quote || "");
+      const extractedPage = Number(json.page || 1);
+      const citationResolution = resolveCitationsFromArtifact(
+        doc,
+        extractedValue,
+        extractedQuote,
+        extractedPage
+      );
 
       return {
-        value: String(json.value || ""),
+        value: extractedValue,
         confidence: (json.confidence as any) || "Low",
-        quote: json.quote || "",
-        page: json.page || 1,
+        quote: citationResolution.quote,
+        page: citationResolution.page,
         reasoning: json.reasoning || "",
+        citations: citationResolution.citations,
         status: 'needs_review'
       };
 

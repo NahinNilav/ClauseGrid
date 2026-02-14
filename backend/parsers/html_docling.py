@@ -160,6 +160,7 @@ def parse_html_with_docling(
         "markdown": markdown,
         "docling_json": docling_json,
         "blocks": blocks,
+        "preview_html": cleaned_html,
         "dom_map_size": len(dom_map),
         "parser": "docling",
     }

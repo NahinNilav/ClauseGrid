@@ -64,6 +64,17 @@ const App: React.FC = () => {
   // Document Selection State (for re-run)
   const [selectedDocIds, setSelectedDocIds] = useState<Set<string>>(new Set());
 
+  const toBase64 = (buffer: ArrayBuffer): string => {
+    const bytes = new Uint8Array(buffer);
+    const chunkSize = 0x8000;
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      const chunk = bytes.subarray(i, i + chunkSize);
+      binary += String.fromCharCode(...chunk);
+    }
+    return btoa(binary);
+  };
+
   // Handlers
   
   // Project Save/Load Handlers
@@ -147,9 +158,12 @@ const App: React.FC = () => {
 
         for (let i = 0; i < fileList.length; i++) {
           const file = fileList[i];
+          const sourceArrayBuffer = await file.arrayBuffer();
+          const sourceContentBase64 = toBase64(sourceArrayBuffer);
           
           // Use local deterministic processor (markitdown style)
-          const markdownContent = await processDocumentToMarkdown(file);
+          const processedDoc = await processDocumentToMarkdown(file);
+          const markdownContent = processedDoc.markdown;
           
           // Encode to Base64 to match our storage format (mimicking the sample data structure)
           // This keeps the rest of the app (which expects base64 strings for "content") happy
@@ -161,7 +175,10 @@ const App: React.FC = () => {
             type: file.type,
             size: file.size,
             content: contentBase64,
-            mimeType: 'text/markdown' // Force to markdown so the viewer treats it as text
+            mimeType: 'text/markdown', // Force to markdown so the viewer treats it as text
+            sourceContentBase64,
+            sourceMimeType: file.type || processedDoc.artifact?.mime_type || 'application/octet-stream',
+            artifact: processedDoc.artifact,
           });
 
           // Update progress AFTER file is processed
@@ -174,6 +191,8 @@ const App: React.FC = () => {
             metadata: {
               file_name: file.name,
               file_size_bytes: file.size,
+              artifact_format: processedDoc.artifact?.format || 'none',
+              citation_count: Object.keys(processedDoc.artifact?.citation_index || {}).length,
             },
           });
         }

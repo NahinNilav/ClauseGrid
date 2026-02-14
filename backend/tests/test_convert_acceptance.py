@@ -33,6 +33,7 @@ class ConvertAcceptanceTests(unittest.TestCase):
         artifact = payload.get("artifact") or {}
         self.assertEqual(artifact.get("format"), "html")
         self.assertTrue((artifact.get("chunks") or []), "Expected non-empty chunks for HTML")
+        self.assertTrue((artifact.get("preview_html") or "").strip(), "Expected non-empty HTML preview payload")
 
         citations = []
         for block in artifact.get("blocks", []):
@@ -49,12 +50,36 @@ class ConvertAcceptanceTests(unittest.TestCase):
         artifact = payload.get("artifact") or {}
         self.assertEqual(artifact.get("format"), "pdf")
         self.assertTrue((artifact.get("chunks") or []), "Expected non-empty chunks for PDF")
+        page_index = (((artifact.get("metadata") or {}).get("page_index")) or {})
+        self.assertTrue(page_index, "Expected page_index metadata for PDF")
+        self.assertIn("1", page_index)
+        self.assertIn("width", page_index["1"])
+        self.assertIn("height", page_index["1"])
 
         citations = []
         for block in artifact.get("blocks", []):
             citations.extend(block.get("citations", []))
 
         self.assertTrue(any(c.get("page") for c in citations), "Expected page-based PDF citations")
+
+    def test_pdf_page_render_endpoint_returns_image_and_dimensions(self):
+        path = os.path.join(self.data_dir, "tsla-ex103_462.htm.pdf")
+        with open(path, "rb") as f:
+            response = self.client.post(
+                "/render-pdf-page",
+                files={"file": ("tsla-ex103_462.htm.pdf", f, "application/pdf")},
+                data={"page": "1", "scale": "1.4", "snippet": "Exhibit 10.3"},
+            )
+
+        self.assertEqual(response.status_code, 200, msg=response.text)
+        payload = response.json()
+        self.assertEqual(payload.get("page"), 1)
+        self.assertGreater(payload.get("page_count", 0), 0)
+        self.assertGreater(payload.get("page_width", 0), 0)
+        self.assertGreater(payload.get("page_height", 0), 0)
+        self.assertGreater(payload.get("image_width", 0), 0)
+        self.assertGreater(payload.get("image_height", 0), 0)
+        self.assertTrue((payload.get("image_base64") or "").strip())
 
 
 if __name__ == "__main__":

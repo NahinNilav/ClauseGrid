@@ -6,11 +6,14 @@ import os
 import tempfile
 import time
 import uuid
+from base64 import b64encode
+from io import BytesIO
 from typing import Any, Dict, Literal, Optional
 
+import pypdfium2 as pdfium
 from docling.datamodel.base_models import InputFormat
 from docling.document_converter import DocumentConverter, HTMLFormatOption
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -190,10 +193,12 @@ async def convert_document(request: Request, file: UploadFile = File(...)):
             blocks=blocks,
             chunks=chunks,
             citation_index=citation_index,
+            preview_html=parser_result.get("preview_html"),
             metadata={
                 "parser": parser_result.get("parser", "unknown"),
                 "dom_map_size": parser_result.get("dom_map_size"),
                 "worker_error": parser_result.get("worker_error"),
+                "page_index": parser_result.get("page_index", {}),
             },
         )
 
@@ -230,6 +235,118 @@ async def convert_document(request: Request, file: UploadFile = File(...)):
             error=str(e),
         )
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _bbox_from_char_range(text_page, start: int, count: int) -> Optional[list[float]]:
+    if count <= 0:
+        return None
+    boxes = []
+    for idx in range(start, start + count):
+        try:
+            x0, y0, x1, y1 = text_page.get_charbox(idx)
+        except Exception:
+            continue
+        if x1 <= x0 or y1 <= y0:
+            continue
+        boxes.append((x0, y0, x1, y1))
+
+    if not boxes:
+        return None
+
+    return [
+        float(min(b[0] for b in boxes)),
+        float(min(b[1] for b in boxes)),
+        float(max(b[2] for b in boxes)),
+        float(max(b[3] for b in boxes)),
+    ]
+
+
+@app.post("/render-pdf-page")
+async def render_pdf_page(
+    request: Request,
+    file: UploadFile = File(...),
+    page: int = Form(1),
+    scale: float = Form(1.5),
+    snippet: str = Form(""),
+):
+    request_id = getattr(request.state, "request_id", None)
+    start = time.perf_counter()
+
+    if page < 1:
+        raise HTTPException(status_code=400, detail="page must be >= 1")
+    if scale <= 0.1 or scale > 4.0:
+        raise HTTPException(status_code=400, detail="scale out of range")
+
+    raw_bytes = await file.read()
+    if not raw_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded PDF is empty")
+
+    tmp_path = _write_temp_file(raw_bytes, suffix=".pdf")
+    try:
+        pdf = pdfium.PdfDocument(tmp_path)
+        try:
+            page_count = len(pdf)
+            if page > page_count:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"page out of range: {page} > {page_count}",
+                )
+
+            page_obj = pdf[page - 1]
+            text_page = page_obj.get_textpage()
+            try:
+                width, height = page_obj.get_size()
+
+                rendered = page_obj.render(scale=scale)
+                try:
+                    pil_image = rendered.to_pil()
+                    buffer = BytesIO()
+                    pil_image.save(buffer, format="PNG")
+                    image_base64 = b64encode(buffer.getvalue()).decode("ascii")
+                finally:
+                    rendered.close()
+
+                matched_bbox = None
+                snippet = (snippet or "").strip()
+                if snippet:
+                    try:
+                        searcher = text_page.search(snippet)
+                        first = searcher.get_next()
+                        if first:
+                            start_char, count = first
+                            matched_bbox = _bbox_from_char_range(text_page, start_char, count)
+                    except Exception:
+                        matched_bbox = None
+            finally:
+                text_page.close()
+                page_obj.close()
+        finally:
+            pdf.close()
+
+        duration_ms = round((time.perf_counter() - start) * 1000, 2)
+        log_structured(
+            logging.INFO,
+            "render_pdf_page_completed",
+            request_id=request_id,
+            filename=file.filename,
+            page=page,
+            scale=scale,
+            duration_ms=duration_ms,
+        )
+
+        return {
+            "page": page,
+            "page_count": page_count,
+            "page_width": float(width),
+            "page_height": float(height),
+            "image_width": pil_image.width,
+            "image_height": pil_image.height,
+            "image_base64": image_base64,
+            "matched_bbox": matched_bbox,
+        }
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 
 @app.post("/events")

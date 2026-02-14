@@ -1,6 +1,12 @@
 import { createRunId, logRuntimeEvent } from './runtimeLogger';
+import { ParsedArtifact } from '../types';
 
-export const processDocumentToMarkdown = async (file: File): Promise<string> => {
+export interface ProcessedDocumentPayload {
+  markdown: string;
+  artifact?: ParsedArtifact;
+}
+
+export const processDocumentToMarkdown = async (file: File): Promise<ProcessedDocumentPayload> => {
   const runId = createRunId('conversion');
   const startedAt = performance.now();
 
@@ -44,6 +50,7 @@ export const processDocumentToMarkdown = async (file: File): Promise<string> => 
 
     const data = await response.json();
     const markdown = data.markdown || "";
+    const artifact = data.artifact as ParsedArtifact | undefined;
 
     logRuntimeEvent({
       event: 'document_conversion_completed',
@@ -53,10 +60,12 @@ export const processDocumentToMarkdown = async (file: File): Promise<string> => 
         file_name: file.name,
         duration_ms: Math.round(performance.now() - startedAt),
         markdown_chars: markdown.length,
+        artifact_format: artifact?.format || 'none',
+        artifact_blocks: artifact?.blocks?.length || 0,
       },
     });
 
-    return markdown;
+    return { markdown, artifact };
 
   } catch (error) {
     console.error("Document Conversion failed:", error);

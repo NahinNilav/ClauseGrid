@@ -5,6 +5,45 @@ export interface DocumentFile {
   size: number;
   content: string; // Base64 string for PDF/Images, or raw text for TXT
   mimeType: string;
+  sourceContentBase64?: string;
+  sourceMimeType?: string;
+  artifact?: ParsedArtifact;
+}
+
+export interface SourceCitation {
+  source: 'pdf' | 'html' | 'txt';
+  snippet: string;
+  page?: number;
+  bbox?: number[];
+  selector?: string;
+  start_char?: number;
+  end_char?: number;
+}
+
+export interface ArtifactBlock {
+  id: string;
+  type: string;
+  text: string;
+  citations: SourceCitation[];
+  meta?: Record<string, unknown>;
+}
+
+export interface ParsedArtifact {
+  doc_version_id: string;
+  format: 'pdf' | 'html' | 'txt';
+  mime_type?: string;
+  markdown: string;
+  blocks: ArtifactBlock[];
+  chunks: Array<Record<string, unknown>>;
+  citation_index: Record<string, SourceCitation>;
+  preview_html?: string;
+  metadata?: {
+    parser?: string;
+    dom_map_size?: number;
+    worker_error?: string | null;
+    page_index?: Record<string, { width: number; height: number }>;
+    [key: string]: unknown;
+  };
 }
 
 export type ColumnType = 'text' | 'number' | 'date' | 'boolean' | 'list';
@@ -24,6 +63,7 @@ export interface ExtractionCell {
   quote: string;
   page: number;
   reasoning: string;
+  citations?: SourceCitation[];
   // UI State for review workflow
   status?: 'verified' | 'needs_review' | 'edited';
 }
