@@ -169,6 +169,7 @@ const App: React.FC = () => {
 
   const [newProjectName, setNewProjectName] = useState<string>('Legal Tabular Review Project');
   const [newProjectDescription, setNewProjectDescription] = useState<string>('Take-home demo project for legal contract comparison.');
+  const [showCreateProjectForm, setShowCreateProjectForm] = useState<boolean>(false);
 
   const [templateName, setTemplateName] = useState<string>('Default Legal Template');
   const [draftFields, setDraftFields] = useState<TemplateFieldDefinition[]>(defaultFields);
@@ -381,6 +382,9 @@ const App: React.FC = () => {
         name: newProjectName.trim(),
         description: newProjectDescription,
       });
+      setNewProjectName('Legal Tabular Review Project');
+      setNewProjectDescription('Take-home demo project for legal contract comparison.');
+      setShowCreateProjectForm(false);
       await refreshProjects();
       setSelectedProjectId(data.project.id);
       setTab('documents');
@@ -753,25 +757,50 @@ const App: React.FC = () => {
 
         {!sidebarCollapsed && (
           <div className="p-4 border-b border-[#E5E7EB] space-y-2">
-            <input
-              value={newProjectName}
-              onChange={(e) => setNewProjectName(e.target.value)}
-              placeholder="Project name"
-              className="w-full border border-[#E5E7EB] rounded-lg px-3 py-2 text-sm"
-            />
-            <textarea
-              value={newProjectDescription}
-              onChange={(e) => setNewProjectDescription(e.target.value)}
-              placeholder="Project description"
-              className="w-full border border-[#E5E7EB] rounded-lg px-3 py-2 text-sm min-h-[70px]"
-            />
-            <button
-              onClick={createProject}
-              disabled={busy}
-              className="w-full bg-[#1C1C1C] text-white rounded-pill px-4 py-2 text-sm font-semibold disabled:opacity-50"
-            >
-              Create Project
-            </button>
+            {!showCreateProjectForm ? (
+              <button
+                onClick={() => setShowCreateProjectForm(true)}
+                disabled={busy}
+                className="w-full bg-[#1C1C1C] text-white rounded-pill px-4 py-2 text-sm font-semibold disabled:opacity-50 hover:bg-[#2A2A2A] transition-colors"
+              >
+                + New Project
+              </button>
+            ) : (
+              <>
+                <input
+                  value={newProjectName}
+                  onChange={(e) => setNewProjectName(e.target.value)}
+                  placeholder="Project name"
+                  className="w-full border border-[#E5E7EB] rounded-lg px-3 py-2 text-sm"
+                />
+                <textarea
+                  value={newProjectDescription}
+                  onChange={(e) => setNewProjectDescription(e.target.value)}
+                  placeholder="Project description"
+                  className="w-full border border-[#E5E7EB] rounded-lg px-3 py-2 text-sm min-h-[70px]"
+                />
+                <div className="flex gap-2">
+                  <button
+                    onClick={createProject}
+                    disabled={busy}
+                    className="flex-1 bg-[#1C1C1C] text-white rounded-pill px-4 py-2 text-sm font-semibold disabled:opacity-50 hover:bg-[#2A2A2A] transition-colors"
+                  >
+                    Create Project
+                  </button>
+                  <button
+                    onClick={() => {
+                      setShowCreateProjectForm(false);
+                      setNewProjectName('Legal Tabular Review Project');
+                      setNewProjectDescription('Take-home demo project for legal contract comparison.');
+                    }}
+                    disabled={busy}
+                    className="px-4 py-2 rounded-pill text-sm font-semibold bg-[#F5F4F0] text-[#6B6555] disabled:opacity-50 hover:bg-[#E5E7EB] transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         )}
 
@@ -831,15 +860,32 @@ const App: React.FC = () => {
           )}
         </div>
 
-        <div className="border-t border-[#E5E7EB] p-3 text-xs text-[#8A8470]">
+        <div className={`border-t border-[#E5E7EB] p-3 text-xs transition-all duration-200 ${
+          uniquePendingTaskIds.length > 0
+            ? 'bg-gradient-to-b from-[#FDF5F3] to-[#FBE7D8] border-t-2 border-t-[#E5B89F]'
+            : 'bg-white text-[#8A8470]'
+        }`}>
           {!sidebarCollapsed ? (
             <>
               <div className="flex items-center justify-between gap-2">
-                <span>Tasks In Flight: {uniquePendingTaskIds.length}</span>
+                <div className="flex items-center gap-2">
+                  <span className={`${
+                    uniquePendingTaskIds.length > 0 ? 'font-bold text-[#8A3B00]' : 'text-[#8A8470]'
+                  }`}>
+                    Tasks In Flight:
+                  </span>
+                  {uniquePendingTaskIds.length > 0 ? (
+                    <span className="inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full bg-[#D97757] text-white text-[10px] font-bold animate-pulse">
+                      {uniquePendingTaskIds.length}
+                    </span>
+                  ) : (
+                    <span className="text-[#8A8470]">{uniquePendingTaskIds.length}</span>
+                  )}
+                </div>
                 <button
                   onClick={cancelAllPendingTasks}
                   disabled={busy || !selectedProjectId || !uniquePendingTaskIds.length}
-                  className="px-2 py-1 rounded bg-[#FBE7D8] text-[#8A3B00] text-[10px] font-semibold disabled:opacity-50"
+                  className="px-2 py-1 rounded bg-[#FBE7D8] text-[#8A3B00] text-[10px] font-semibold disabled:opacity-30 hover:bg-[#F5D5C3] transition-colors"
                 >
                   Cancel Pending
                 </button>
@@ -847,14 +893,14 @@ const App: React.FC = () => {
               {uniquePendingTaskIds.slice(0, 6).map((id) => {
                 const task = tasks[id];
                 return (
-                  <div key={id} className="mt-1 flex items-center justify-between gap-2">
-                    <span className="truncate">
+                  <div key={id} className="mt-2 flex items-center justify-between gap-2 bg-white/60 rounded-lg px-2 py-1.5 border border-[#E5B89F]">
+                    <span className="truncate text-[#8A3B00] font-medium">
                       {task?.task_type || 'TASK'} · {task?.status || 'QUEUED'}
                     </span>
                     <button
                       onClick={() => void cancelTaskById(id)}
                       disabled={busy}
-                      className="px-2 py-0.5 rounded bg-[#F5F4F0] text-[10px] font-semibold text-[#6B6555] disabled:opacity-50"
+                      className="px-2 py-0.5 rounded bg-[#FBE7D8] text-[10px] font-semibold text-[#8A3B00] disabled:opacity-50 hover:bg-[#F5D5C3] transition-colors"
                     >
                       Cancel
                     </button>
@@ -863,7 +909,20 @@ const App: React.FC = () => {
               })}
             </>
           ) : (
-            <div className="text-center text-[10px]">Tasks: {uniquePendingTaskIds.length}</div>
+            <div className={`text-center text-[10px] ${
+              uniquePendingTaskIds.length > 0 ? 'font-bold text-[#8A3B00]' : ''
+            }`}>
+              {uniquePendingTaskIds.length > 0 ? (
+                <div className="flex flex-col items-center gap-1">
+                  <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-[#D97757] text-white text-xs font-bold animate-pulse">
+                    {uniquePendingTaskIds.length}
+                  </span>
+                  <span className="text-[8px]">Tasks</span>
+                </div>
+              ) : (
+                `Tasks: ${uniquePendingTaskIds.length}`
+              )}
+            </div>
           )}
         </div>
       </aside>
