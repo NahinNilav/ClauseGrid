@@ -3,4 +3,5 @@ uvicorn
 python-multipart
 docling
 mlx_vlm
-
+beautifulsoup4
+pypdfium2

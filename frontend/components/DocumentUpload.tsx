@@ -49,7 +49,7 @@ export const DocumentUpload: React.FC<DocumentUploadProps> = ({ onUpload, onLoad
         <input 
           type="file" 
           multiple 
-          accept=".pdf,.txt,.md,.json" 
+          accept=".pdf,.htm,.html,.txt,.md,.json" 
           onChange={handleFileChange}
           className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
         />
@@ -59,7 +59,7 @@ export const DocumentUpload: React.FC<DocumentUploadProps> = ({ onUpload, onLoad
           </div>
           <div className="space-y-1">
             <p className="font-bold text-xl text-[#1C1C1C] font-serif">Drag & drop contracts here</p>
-            <p className="text-sm text-[#A8A291]">Supports PDF, TXT, DOCX</p>
+            <p className="text-sm text-[#A8A291]">Supports PDF, HTML, TXT, DOCX</p>
           </div>
         </div>
       </div>

@@ -1,20 +1,25 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
-from docling.document_converter import DocumentConverter
-from docling.datamodel.pipeline_options import PdfPipelineOptions
-from docling.datamodel.accelerator_options import AcceleratorDevice, AcceleratorOptions
-from docling.datamodel.base_models import InputFormat
-from docling.document_converter import PdfFormatOption
-from pydantic import BaseModel, Field
-from typing import Any, Dict, Literal, Optional
-import tempfile
-import os
-import shutil
-import platform
-import logging
+from __future__ import annotations
+
 import json
+import logging
+import os
+import tempfile
 import time
 import uuid
+from typing import Any, Dict, Literal, Optional
+
+from docling.datamodel.base_models import InputFormat
+from docling.document_converter import DocumentConverter, HTMLFormatOption
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+from artifact_schema import build_citation_index, make_artifact
+from chunker import chunk_blocks
+from mime_router import route_file
+from parsers.html_docling import parse_html_with_docling
+from parsers.pdf_docling import parse_pdf
+from parsers.text_plain import parse_text
 
 app = FastAPI()
 
@@ -38,11 +43,10 @@ def log_structured(level: int, event: str, **fields: Any) -> None:
 
 
 # Configure CORS
-# In production, replace with specific origins
 origins = [
     "http://localhost:3000",
     "http://localhost:3001",
-    "http://localhost:5173", # Vite default
+    "http://localhost:5173",  # Vite default
 ]
 
 app.add_middleware(
@@ -53,32 +57,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Use MPS (Metal Performance Shaders) on Apple Silicon Macs
-def create_converter():
-    if platform.system() == "Darwin":  # macOS
-        print("Detected macOS - enabling MPS (Metal) GPU acceleration")
-        accelerator_options = AcceleratorOptions(
-            device=AcceleratorDevice.MPS,
-            num_threads=4
-        )
-    else:
-        print("Running on CPU (MPS not available)")
-        accelerator_options = AcceleratorOptions(
-            device=AcceleratorDevice.AUTO,
-            num_threads=4
-        )
-    
-    # Configure PDF pipeline with accelerator options
-    pdf_pipeline_options = PdfPipelineOptions()
-    pdf_pipeline_options.accelerator_options = accelerator_options
-    
+
+def create_html_converter() -> DocumentConverter:
     return DocumentConverter(
         format_options={
-            InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_pipeline_options)
+            InputFormat.HTML: HTMLFormatOption(),
         }
     )
 
-converter = create_converter()
+
+html_converter = create_html_converter()
 
 
 @app.middleware("http")
@@ -124,49 +112,113 @@ class ClientLogEvent(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
+def _write_temp_file(raw_bytes: bytes, suffix: str) -> str:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(raw_bytes)
+        return tmp.name
+
+
 @app.post("/convert")
 async def convert_document(request: Request, file: UploadFile = File(...)):
     request_id = getattr(request.state, "request_id", None)
     convert_start = time.perf_counter()
+
     try:
+        raw_bytes = await file.read()
+        if not raw_bytes:
+            raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+        routed = route_file(
+            filename=file.filename or "",
+            declared_mime_type=file.content_type,
+            raw_bytes=raw_bytes,
+        )
+
         log_structured(
             logging.INFO,
             "convert_started",
             request_id=request_id,
             filename=file.filename,
             content_type=file.content_type,
+            routed_format=routed.format,
+            routed_mime_type=routed.mime_type,
+            ext=routed.ext,
+            sha256=routed.sha256,
         )
 
-        # Create a temporary file to save the uploaded content
-        # Docling needs a file path
-        suffix = os.path.splitext(file.filename)[1]
-        if not suffix:
-            suffix = ""
-            
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            shutil.copyfileobj(file.file, tmp)
-            tmp_path = tmp.name
-
-        try:
-            # Convert the document
-            result = converter.convert(tmp_path)
-            # Export to markdown
-            markdown_content = result.document.export_to_markdown()
-            duration_ms = round((time.perf_counter() - convert_start) * 1000, 2)
-            log_structured(
-                logging.INFO,
-                "convert_completed",
-                request_id=request_id,
-                filename=file.filename,
-                markdown_chars=len(markdown_content),
-                duration_ms=duration_ms,
+        if routed.format == "unsupported":
+            raise HTTPException(
+                status_code=415,
+                detail=f"Unsupported file type: {routed.mime_type or 'unknown'} ({routed.ext or 'no extension'})",
             )
-            return {"markdown": markdown_content}
-        finally:
-            # Clean up the temporary file
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-                
+
+        parser_result: Dict[str, Any]
+
+        if routed.format == "pdf":
+            suffix = routed.ext or ".pdf"
+            tmp_path = _write_temp_file(raw_bytes, suffix=suffix)
+            try:
+                parser_result = parse_pdf(pdf_path=tmp_path)
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+
+        elif routed.format == "html":
+            parser_result = parse_html_with_docling(
+                converter=html_converter,
+                raw_bytes=raw_bytes,
+                filename=file.filename or "document.html",
+            )
+
+        else:
+            parser_result = parse_text(raw_bytes)
+
+        blocks = parser_result["blocks"]
+        chunks = chunk_blocks(blocks)
+        citation_index = build_citation_index(blocks)
+
+        doc_version_id = f"dv_{uuid.uuid4().hex[:12]}"
+        artifact = make_artifact(
+            doc_version_id=doc_version_id,
+            doc_format=routed.format,
+            filename=file.filename or "",
+            mime_type=routed.mime_type,
+            ext=routed.ext,
+            sha256=routed.sha256,
+            markdown=parser_result.get("markdown", ""),
+            docling_json=parser_result.get("docling_json", {}),
+            blocks=blocks,
+            chunks=chunks,
+            citation_index=citation_index,
+            metadata={
+                "parser": parser_result.get("parser", "unknown"),
+                "dom_map_size": parser_result.get("dom_map_size"),
+                "worker_error": parser_result.get("worker_error"),
+            },
+        )
+
+        duration_ms = round((time.perf_counter() - convert_start) * 1000, 2)
+        log_structured(
+            logging.INFO,
+            "convert_completed",
+            request_id=request_id,
+            filename=file.filename,
+            markdown_chars=len(artifact["markdown"]),
+            block_count=len(artifact["blocks"]),
+            chunk_count=len(artifact["chunks"]),
+            citations_count=len(artifact["citation_index"]),
+            parser=artifact["metadata"].get("parser"),
+            duration_ms=duration_ms,
+        )
+
+        # Preserve markdown for existing frontend behavior, add rich artifact payload.
+        return {
+            "markdown": artifact["markdown"],
+            "artifact": artifact,
+        }
+
+    except HTTPException:
+        raise
     except Exception as e:
         duration_ms = round((time.perf_counter() - convert_start) * 1000, 2)
         log_structured(
@@ -204,4 +256,5 @@ async def ingest_client_event(request: Request, payload: ClientLogEvent):
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -24,3 +24,16 @@ Endpoints (to be implemented)
 - GET /get-project-status
 - POST /index-document-async
 - GET /get-request-status
+
+Current Local Endpoint
+- `POST /convert`
+  - Routes uploaded files by content sniffing + MIME:
+    - PDF (`application/pdf` or `%PDF` header)
+    - HTML/HTM (`text/html` or HTML markers)
+    - TXT/MD (plain text)
+  - Returns backward-compatible `markdown` plus a rich `artifact` payload:
+    - `doc_version_id`, `format`, `mime_type`, `ext`, `sha256`
+    - `blocks`, `chunks`, and `citation_index`
+  - Citation strategy:
+    - PDF: page-based citations (with bbox when available)
+    - HTML: selector + character offsets in DOM text

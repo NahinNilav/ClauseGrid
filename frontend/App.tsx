@@ -700,7 +700,7 @@ const App: React.FC = () => {
         onChange={handleFileUpload}
         multiple
         className="hidden"
-        accept=".pdf,.txt,.md,.json,.docx"
+        accept=".pdf,.htm,.html,.txt,.md,.json,.docx"
       />
 
       {/* Main Content Area */}
