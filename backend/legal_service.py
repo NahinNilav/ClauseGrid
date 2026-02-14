@@ -300,6 +300,16 @@ class LegalReviewService:
             {"project_id": project_id},
         )
 
+    def delete_project(self, project_id: str) -> bool:
+        project = self.get_project(project_id)
+        if not project:
+            return False
+
+        # Best-effort cancellation before delete to reduce in-flight background work.
+        self.cancel_project_tasks(project_id, reason="Canceled due to project deletion.")
+        self.db.execute("DELETE FROM projects WHERE id=:project_id", {"project_id": project_id})
+        return True
+
     # Tasks
     def create_task(
         self,
@@ -432,7 +442,7 @@ class LegalReviewService:
     def is_task_canceled(self, task_id: str) -> bool:
         task = self.get_task(task_id)
         if not task:
-            return False
+            return True
         return str(task.get("status") or "").upper() == "CANCELED"
 
     def cancel_task(self, task_id: str, *, reason: str | None = None) -> Optional[Dict[str, Any]]:

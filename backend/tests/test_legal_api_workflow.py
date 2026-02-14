@@ -221,6 +221,32 @@ class LegalApiWorkflowTests(unittest.TestCase):
         self.assertEqual(single_delete.status_code, 200, msg=single_delete.text)
         self.assertTrue(single_delete.json().get("deleted"))
 
+    def test_delete_project(self):
+        create_project = self.client.post(
+            "/api/projects",
+            json={"name": "Delete Me", "description": "Project delete validation"},
+        )
+        self.assertEqual(create_project.status_code, 200, msg=create_project.text)
+        project_id = create_project.json()["project"]["id"]
+
+        delete_response = self.client.delete(f"/api/projects/{project_id}")
+        self.assertEqual(delete_response.status_code, 200, msg=delete_response.text)
+        self.assertTrue(delete_response.json().get("deleted"))
+
+        get_response = self.client.get(f"/api/projects/{project_id}")
+        self.assertEqual(get_response.status_code, 404, msg=get_response.text)
+
+        create_project_2 = self.client.post(
+            "/api/projects",
+            json={"name": "Delete Me Compat", "description": "Project delete compatibility validation"},
+        )
+        self.assertEqual(create_project_2.status_code, 200, msg=create_project_2.text)
+        project_id_2 = create_project_2.json()["project"]["id"]
+
+        delete_response_compat = self.client.post(f"/api/projects/{project_id_2}/delete")
+        self.assertEqual(delete_response_compat.status_code, 200, msg=delete_response_compat.text)
+        self.assertTrue(delete_response_compat.json().get("deleted"))
+
 
 if __name__ == "__main__":
     unittest.main()

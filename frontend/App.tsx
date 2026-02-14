@@ -181,6 +181,7 @@ const App: React.FC = () => {
   const [qualityProfile, setQualityProfile] = useState<QualityProfile>('high');
   const [showUnresolvedOnly, setShowUnresolvedOnly] = useState<boolean>(false);
   const [showLowConfidenceOnly, setShowLowConfidenceOnly] = useState<boolean>(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
 
   const selectedCell = useMemo(() => {
     if (!tableView || !selectedRowVersionId || !selectedFieldKey) return null;
@@ -342,6 +343,59 @@ const App: React.FC = () => {
       setTab('documents');
     } catch (err: any) {
       setError(err.message || 'Failed to create project');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteProjectById = async (projectId: string) => {
+    const project = projects.find((item) => item.id === projectId);
+    const projectName = project?.name || 'this project';
+    const confirmed = window.confirm(`Delete "${projectName}" and all related data? This cannot be undone.`);
+    if (!confirmed) return;
+
+    setBusy(true);
+    setError('');
+    try {
+      await api.deleteProject(projectId);
+
+      const removedTaskIds = Object.entries(tasks)
+        .filter(([, task]) => task.project_id === projectId)
+        .map(([taskId]) => taskId);
+      if (removedTaskIds.length) {
+        setPendingTaskIds((prev) => prev.filter((taskId) => !removedTaskIds.includes(taskId)));
+        setTasks((prev) => {
+          const next: Record<string, RequestTask> = {};
+          Object.entries(prev).forEach(([taskId, task]) => {
+            if (!removedTaskIds.includes(taskId)) {
+              next[taskId] = task;
+            }
+          });
+          return next;
+        });
+      }
+
+      const data = await api.listProjects();
+      const nextProjects = data.projects || [];
+      setProjects(nextProjects);
+
+      if (selectedProjectId === projectId) {
+        const nextProjectId = nextProjects[0]?.id || null;
+        setSelectedProjectId(nextProjectId);
+        if (!nextProjectId) {
+          setSelectedProject(null);
+          setDocuments([]);
+          setTemplates([]);
+          setTableView(null);
+          setAnnotations([]);
+          setSelectedTemplateId(null);
+          setSelectedTemplateVersionId(null);
+          setSelectedRowVersionId(null);
+          setSelectedFieldKey(null);
+        }
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to delete project');
     } finally {
       setBusy(false);
     }
@@ -625,82 +679,149 @@ const App: React.FC = () => {
 
   return (
     <div className="h-screen w-screen bg-[#F5F4F0] text-[#1C1C1C] flex overflow-hidden font-sans">
-      <aside className="w-[320px] border-r border-[#E5E7EB] bg-white flex flex-col">
-        <div className="p-5 border-b border-[#E5E7EB]">
-          <h1 className="text-xl font-serif font-bold">Legal Tabular Review</h1>
-          <p className="text-xs text-[#8A8470] mt-1">Project lifecycle, extraction runs, review audit, evaluation.</p>
-        </div>
-
-        <div className="p-4 border-b border-[#E5E7EB] space-y-2">
-          <input
-            value={newProjectName}
-            onChange={(e) => setNewProjectName(e.target.value)}
-            placeholder="Project name"
-            className="w-full border border-[#E5E7EB] rounded-lg px-3 py-2 text-sm"
-          />
-          <textarea
-            value={newProjectDescription}
-            onChange={(e) => setNewProjectDescription(e.target.value)}
-            placeholder="Project description"
-            className="w-full border border-[#E5E7EB] rounded-lg px-3 py-2 text-sm min-h-[70px]"
-          />
-          <button
-            onClick={createProject}
-            disabled={busy}
-            className="w-full bg-[#1C1C1C] text-white rounded-pill px-4 py-2 text-sm font-semibold disabled:opacity-50"
-          >
-            Create Project
-          </button>
-        </div>
-
-        <div className="flex-1 overflow-auto p-3">
-          <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#8A8470] px-2 pb-2">Projects</div>
-          <div className="space-y-2">
-            {projects.map((project) => (
+      <aside className={`${sidebarCollapsed ? 'w-[72px]' : 'w-[320px]'} border-r border-[#E5E7EB] bg-white flex flex-col transition-all duration-200`}>
+        <div className="p-3 border-b border-[#E5E7EB]">
+          {!sidebarCollapsed ? (
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <h1 className="text-xl font-serif font-bold">Legal Tabular Review</h1>
+                <p className="text-xs text-[#8A8470] mt-1">Project lifecycle, extraction runs, review audit, evaluation.</p>
+              </div>
               <button
-                key={project.id}
-                onClick={() => setSelectedProjectId(project.id)}
-                className={`w-full text-left rounded-lg px-3 py-3 border transition-colors ${
-                  selectedProjectId === project.id
-                    ? 'bg-[#EFF1F5] border-[#B8BFCE]'
-                    : 'bg-white border-[#E5E7EB] hover:bg-[#FAFAF7]'
-                }`}
+                onClick={() => setSidebarCollapsed(true)}
+                className="px-2 py-1 rounded bg-[#F5F4F0] text-[11px] font-semibold text-[#6B6555]"
+                title="Collapse sidebar"
               >
-                <div className="text-sm font-semibold">{project.name}</div>
-                <div className="text-[11px] text-[#8A8470] mt-0.5">{project.status}</div>
+                Hide
               </button>
-            ))}
+            </div>
+          ) : (
+            <div className="flex items-center justify-center">
+              <button
+                onClick={() => setSidebarCollapsed(false)}
+                className="w-10 h-8 rounded bg-[#F5F4F0] text-xs font-semibold text-[#6B6555]"
+                title="Expand sidebar"
+              >
+                Show
+              </button>
+            </div>
+          )}
+        </div>
+
+        {!sidebarCollapsed && (
+          <div className="p-4 border-b border-[#E5E7EB] space-y-2">
+            <input
+              value={newProjectName}
+              onChange={(e) => setNewProjectName(e.target.value)}
+              placeholder="Project name"
+              className="w-full border border-[#E5E7EB] rounded-lg px-3 py-2 text-sm"
+            />
+            <textarea
+              value={newProjectDescription}
+              onChange={(e) => setNewProjectDescription(e.target.value)}
+              placeholder="Project description"
+              className="w-full border border-[#E5E7EB] rounded-lg px-3 py-2 text-sm min-h-[70px]"
+            />
+            <button
+              onClick={createProject}
+              disabled={busy}
+              className="w-full bg-[#1C1C1C] text-white rounded-pill px-4 py-2 text-sm font-semibold disabled:opacity-50"
+            >
+              Create Project
+            </button>
           </div>
+        )}
+
+        <div className={`flex-1 overflow-auto ${sidebarCollapsed ? 'p-2' : 'p-3'}`}>
+          {!sidebarCollapsed ? (
+            <>
+              <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#8A8470] px-2 pb-2">Projects</div>
+              <div className="space-y-2">
+                {projects.map((project) => (
+                  <div
+                    key={project.id}
+                    className={`w-full rounded-lg border transition-colors px-3 py-3 flex items-start gap-2 ${
+                      selectedProjectId === project.id
+                        ? 'bg-[#EFF1F5] border-[#B8BFCE]'
+                        : 'bg-white border-[#E5E7EB] hover:bg-[#FAFAF7]'
+                    }`}
+                  >
+                    <button
+                      onClick={() => setSelectedProjectId(project.id)}
+                      className="flex-1 text-left min-w-0"
+                    >
+                      <div className="text-sm font-semibold truncate">{project.name}</div>
+                      <div className="text-[11px] text-[#8A8470] mt-0.5">{project.status}</div>
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void deleteProjectById(project.id);
+                      }}
+                      disabled={busy}
+                      className="px-2 py-1 rounded bg-red-50 text-red-700 text-[10px] font-semibold disabled:opacity-50"
+                      title="Delete project"
+                    >
+                      Del
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : (
+            <div className="space-y-2">
+              {projects.map((project) => (
+                <button
+                  key={project.id}
+                  onClick={() => setSelectedProjectId(project.id)}
+                  className={`w-full h-11 rounded border text-xs font-semibold ${
+                    selectedProjectId === project.id
+                      ? 'bg-[#EFF1F5] border-[#B8BFCE]'
+                      : 'bg-white border-[#E5E7EB]'
+                  }`}
+                  title={project.name}
+                >
+                  {(project.name || 'P').trim().charAt(0).toUpperCase()}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="border-t border-[#E5E7EB] p-3 text-xs text-[#8A8470]">
-          <div className="flex items-center justify-between gap-2">
-            <span>Tasks In Flight: {uniquePendingTaskIds.length}</span>
-            <button
-              onClick={cancelAllPendingTasks}
-              disabled={busy || !selectedProjectId || !uniquePendingTaskIds.length}
-              className="px-2 py-1 rounded bg-[#FBE7D8] text-[#8A3B00] text-[10px] font-semibold disabled:opacity-50"
-            >
-              Cancel Pending
-            </button>
-          </div>
-          {uniquePendingTaskIds.slice(0, 6).map((id) => {
-            const task = tasks[id];
-            return (
-              <div key={id} className="mt-1 flex items-center justify-between gap-2">
-                <span className="truncate">
-                  {task?.task_type || 'TASK'} · {task?.status || 'QUEUED'}
-                </span>
+          {!sidebarCollapsed ? (
+            <>
+              <div className="flex items-center justify-between gap-2">
+                <span>Tasks In Flight: {uniquePendingTaskIds.length}</span>
                 <button
-                  onClick={() => void cancelTaskById(id)}
-                  disabled={busy}
-                  className="px-2 py-0.5 rounded bg-[#F5F4F0] text-[10px] font-semibold text-[#6B6555] disabled:opacity-50"
+                  onClick={cancelAllPendingTasks}
+                  disabled={busy || !selectedProjectId || !uniquePendingTaskIds.length}
+                  className="px-2 py-1 rounded bg-[#FBE7D8] text-[#8A3B00] text-[10px] font-semibold disabled:opacity-50"
                 >
-                  Cancel
+                  Cancel Pending
                 </button>
               </div>
-            );
-          })}
+              {uniquePendingTaskIds.slice(0, 6).map((id) => {
+                const task = tasks[id];
+                return (
+                  <div key={id} className="mt-1 flex items-center justify-between gap-2">
+                    <span className="truncate">
+                      {task?.task_type || 'TASK'} · {task?.status || 'QUEUED'}
+                    </span>
+                    <button
+                      onClick={() => void cancelTaskById(id)}
+                      disabled={busy}
+                      className="px-2 py-0.5 rounded bg-[#F5F4F0] text-[10px] font-semibold text-[#6B6555] disabled:opacity-50"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                );
+              })}
+            </>
+          ) : (
+            <div className="text-center text-[10px]">Tasks: {uniquePendingTaskIds.length}</div>
+          )}
         </div>
       </aside>
 

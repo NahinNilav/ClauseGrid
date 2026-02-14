@@ -17,6 +17,8 @@ Workflow API
 - `PATCH /api/projects/{project_id}`
 - `GET /api/projects`
 - `GET /api/projects/{project_id}`
+- `DELETE /api/projects/{project_id}`
+- `POST /api/projects/{project_id}/delete` (compatibility alias)
 - `POST /api/projects/{project_id}/documents`
 - `GET /api/projects/{project_id}/documents`
 - `POST /api/projects/{project_id}/templates`

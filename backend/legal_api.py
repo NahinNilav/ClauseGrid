@@ -396,6 +396,22 @@ def get_project(project_id: str):
     return {"project": project, "documents": documents, "templates": templates}
 
 
+@router.delete("/projects/{project_id}")
+def delete_project(project_id: str):
+    deleted = service.delete_project(project_id)
+    if not deleted:
+        return _problem(404, "Project Not Found", "Project does not exist", instance=f"/api/projects/{project_id}")
+    return {"project_id": project_id, "deleted": True}
+
+
+@router.post("/projects/{project_id}/delete")
+def delete_project_post(project_id: str):
+    deleted = service.delete_project(project_id)
+    if not deleted:
+        return _problem(404, "Project Not Found", "Project does not exist", instance=f"/api/projects/{project_id}/delete")
+    return {"project_id": project_id, "deleted": True}
+
+
 @router.post("/projects/{project_id}/documents")
 async def upload_document(
     project_id: str,

@@ -16,7 +16,14 @@ const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<
       ...(options.body && !(options.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}),
     },
   });
-  const data = await response.json();
+  const contentType = response.headers.get('content-type') || '';
+  let data: any = null;
+  if (contentType.includes('application/json')) {
+    data = await response.json();
+  } else {
+    const text = await response.text();
+    data = { detail: text };
+  }
   if (!response.ok) {
     throw new Error(data?.detail || data?.title || `Request failed (${response.status})`);
   }
@@ -44,6 +51,22 @@ export const api = {
       documents: any[];
       templates: any[];
     }>(`/api/projects/${projectId}`),
+
+  deleteProject: async (projectId: string) => {
+    try {
+      return await requestJson<{ project_id: string; deleted: boolean }>(`/api/projects/${projectId}`, {
+        method: 'DELETE',
+      });
+    } catch (err: any) {
+      const message = String(err?.message || '');
+      if (message.toLowerCase().includes('method not allowed') || message.includes('(405)')) {
+        return requestJson<{ project_id: string; deleted: boolean }>(`/api/projects/${projectId}/delete`, {
+          method: 'POST',
+        });
+      }
+      throw err;
+    }
+  },
 
   uploadProjectDocument: async (projectId: string, file: File) => {
     const form = new FormData();
