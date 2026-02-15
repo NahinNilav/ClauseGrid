@@ -1167,6 +1167,10 @@ class LegalReviewService:
 
         completed = 0
         failed = 0
+        anchor_decisions = 0
+        global_rescue_count = 0
+        page_distance_sum = 0.0
+        page_distance_count = 0
 
         for doc in latest_versions:
             version = doc["latest_version"]
@@ -1214,6 +1218,18 @@ class LegalReviewService:
                     failed += 1
                 else:
                     completed += 1
+                anchor_debug = result.get("_anchor_debug")
+                if isinstance(anchor_debug, dict):
+                    anchor_decisions += 1
+                    if str(anchor_debug.get("anchor_mode") or "") == "global_rescue":
+                        global_rescue_count += 1
+                    page_distance = anchor_debug.get("page_distance")
+                    try:
+                        if page_distance is not None:
+                            page_distance_sum += abs(float(page_distance))
+                            page_distance_count += 1
+                    except (TypeError, ValueError):
+                        pass
                 payload = {
                     "id": _new_id("ext"),
                     "extraction_run_id": run_id,
@@ -1257,6 +1273,21 @@ class LegalReviewService:
                     """,
                     payload,
                 )
+
+        if anchor_decisions:
+            rescue_rate = global_rescue_count / max(1, anchor_decisions)
+            mean_page_distance = (page_distance_sum / page_distance_count) if page_distance_count else None
+            _log_structured(
+                logging.INFO,
+                "anchor_rescue_summary",
+                run_id=run_id,
+                project_id=run["project_id"],
+                anchor_decisions=anchor_decisions,
+                global_rescue_count=global_rescue_count,
+                global_rescue_rate=round(rescue_rate, 4),
+                page_distance_count=page_distance_count,
+                mean_page_distance=round(mean_page_distance, 4) if mean_page_distance is not None else None,
+            )
 
         final_status = "COMPLETED"
         if failed and completed:
@@ -1548,6 +1579,107 @@ class LegalReviewService:
         return overlap / max(1, len(right_tokens))
 
     @staticmethod
+    def _date_probe_variants(value: str) -> List[str]:
+        text = _normalize_space(value)
+        iso = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", text)
+        if not iso:
+            return []
+        yyyy, mm, dd = iso.groups()
+        month_index = int(mm)
+        day_index = int(dd)
+        month_names = [
+            "",
+            "January",
+            "February",
+            "March",
+            "April",
+            "May",
+            "June",
+            "July",
+            "August",
+            "September",
+            "October",
+            "November",
+            "December",
+        ]
+        month_abbrev = [
+            "",
+            "Jan",
+            "Feb",
+            "Mar",
+            "Apr",
+            "May",
+            "Jun",
+            "Jul",
+            "Aug",
+            "Sep",
+            "Oct",
+            "Nov",
+            "Dec",
+        ]
+        if month_index < 1 or month_index >= len(month_names):
+            return []
+        month_full = month_names[month_index]
+        month_short = month_abbrev[month_index]
+        return [
+            f"{month_full} {day_index}, {yyyy}",
+            f"{month_short} {day_index}, {yyyy}",
+            f"{day_index} {month_full} {yyyy}",
+            f"{day_index} {month_short} {yyyy}",
+        ]
+
+    @staticmethod
+    def _citation_page(citation: Dict[str, Any]) -> Optional[int]:
+        raw_page = (citation or {}).get("page")
+        try:
+            return int(raw_page)
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _score_block_for_anchor(
+        cls,
+        *,
+        block_text: str,
+        value: str,
+        raw_text: str,
+        date_probes: List[str],
+        source_boost: bool = False,
+    ) -> Tuple[float, bool]:
+        normalized_block = _normalize_space(block_text).lower()
+        normalized_value = _normalize_space(value).lower()
+        normalized_raw = _normalize_space(raw_text).lower()
+
+        score = 0.0
+        explicit_match = False
+        score += 2.5 * cls._text_overlap_score(block_text, value)
+        score += 1.25 * cls._text_overlap_score(block_text, raw_text)
+
+        if normalized_value and len(normalized_value) >= 8 and normalized_value in normalized_block:
+            score += 1.5
+            explicit_match = True
+        if normalized_raw and len(normalized_raw) >= 12 and normalized_raw in normalized_block:
+            score += 1.0
+            explicit_match = True
+
+        for probe in date_probes:
+            normalized_probe = _normalize_space(probe).lower()
+            if not normalized_probe:
+                continue
+            score += 1.5 * cls._text_overlap_score(block_text, probe)
+            if normalized_probe in normalized_block:
+                score += 2.0
+                explicit_match = True
+
+        if source_boost:
+            score += 0.35
+
+        if "confidential treatment requested by tesla" in normalized_block and not explicit_match:
+            score -= 0.25
+
+        return score, explicit_match
+
+    @staticmethod
     def _citation_key(citation: Dict[str, Any]) -> str:
         return json.dumps(citation, sort_keys=True, default=str)
 
@@ -1573,26 +1705,50 @@ class LegalReviewService:
         retrieval_block_by_id: Dict[str, Dict[str, Any]],
         value: str,
         raw_text: str,
-    ) -> Tuple[List[Dict[str, Any]], Optional[str], float]:
+    ) -> Dict[str, Any]:
         candidate_citations = [
             dict(citation)
             for citation in (selected_candidate.get("citations") or [])
             if isinstance(citation, dict)
         ]
         if not candidate_citations:
-            return [], None, 0.0
+            return {
+                "citations": [],
+                "chosen_block_id": None,
+                "chosen_score": 0.0,
+                "anchor_mode": "segment",
+                "segment_best_score": 0.0,
+                "global_best_score": 0.0,
+                "chosen_page": None,
+                "segment_page": None,
+                "global_page": None,
+                "page_distance": None,
+            }
 
         segment_block_ids = [str(item) for item in (selected_candidate.get("segment_block_ids") or []) if item]
         source_block_ids = {str(item) for item in (selected_candidate.get("source_block_ids") or []) if item}
         if not segment_block_ids:
-            return cls._dedupe_citations(candidate_citations), None, 0.0
+            ordered = cls._dedupe_citations(candidate_citations)
+            chosen_page = cls._citation_page(ordered[0]) if ordered else None
+            return {
+                "citations": ordered,
+                "chosen_block_id": None,
+                "chosen_score": 0.0,
+                "anchor_mode": "segment",
+                "segment_best_score": 0.0,
+                "global_best_score": 0.0,
+                "chosen_page": chosen_page,
+                "segment_page": chosen_page,
+                "global_page": None,
+                "page_distance": None,
+            }
 
-        normalized_value = _normalize_space(value).lower()
-        normalized_raw = _normalize_space(raw_text).lower()
+        date_probes = cls._date_probe_variants(value)
 
-        best_block_id: Optional[str] = None
-        best_score = -1.0
-        primary_block_citations: List[Dict[str, Any]] = []
+        segment_best_block_id: Optional[str] = None
+        segment_best_score = -1.0
+        segment_primary_citations: List[Dict[str, Any]] = []
+        segment_explicit_match = False
         for block_id in segment_block_ids:
             block = retrieval_block_by_id.get(block_id)
             if not isinstance(block, dict):
@@ -1601,31 +1757,101 @@ class LegalReviewService:
             if not block_text:
                 continue
 
-            score = 0.0
-            score += 2.5 * cls._text_overlap_score(block_text, value)
-            score += 1.25 * cls._text_overlap_score(block_text, raw_text)
-            normalized_block = block_text.lower()
-            if normalized_value and len(normalized_value) >= 8 and normalized_value in normalized_block:
-                score += 1.5
-            if normalized_raw and len(normalized_raw) >= 12 and normalized_raw in normalized_block:
-                score += 1.0
-            if block_id in source_block_ids:
-                score += 0.35
-
-            if score > best_score:
-                best_score = score
-                best_block_id = block_id
-                primary_block_citations = [
+            score, explicit_match = cls._score_block_for_anchor(
+                block_text=block_text,
+                value=value,
+                raw_text=raw_text,
+                date_probes=date_probes,
+                source_boost=block_id in source_block_ids,
+            )
+            if score > segment_best_score:
+                segment_best_score = score
+                segment_best_block_id = block_id
+                segment_explicit_match = explicit_match
+                segment_primary_citations = [
                     dict(citation)
                     for citation in (block.get("citations") or [])
                     if isinstance(citation, dict)
                 ]
 
-        if not primary_block_citations:
-            return cls._dedupe_citations(candidate_citations), best_block_id, max(0.0, best_score)
+        global_best_block_id: Optional[str] = None
+        global_best_score = -1.0
+        global_primary_citations: List[Dict[str, Any]] = []
+        global_explicit_match = False
+        for block_id, block in retrieval_block_by_id.items():
+            if not isinstance(block, dict):
+                continue
+            block_text = _normalize_space(str(block.get("text") or ""))
+            if not block_text:
+                continue
+            score, explicit_match = cls._score_block_for_anchor(
+                block_text=block_text,
+                value=value,
+                raw_text=raw_text,
+                date_probes=date_probes,
+                source_boost=False,
+            )
+            if score > global_best_score:
+                global_best_score = score
+                global_best_block_id = str(block_id or "")
+                global_explicit_match = explicit_match
+                global_primary_citations = [
+                    dict(citation)
+                    for citation in (block.get("citations") or [])
+                    if isinstance(citation, dict)
+                ]
 
-        ordered = cls._dedupe_citations(primary_block_citations + candidate_citations)
-        return ordered, best_block_id, max(0.0, best_score)
+        segment_best_score = max(0.0, segment_best_score)
+        global_best_score = max(0.0, global_best_score)
+        segment_is_weak = segment_best_score < 1.05
+        global_is_better = global_best_score >= segment_best_score + 0.45
+        global_is_much_better = global_best_score >= segment_best_score + 0.9
+        global_has_explicit_advantage = global_explicit_match and not segment_explicit_match and global_best_score >= segment_best_score
+        use_global_rescue = bool(
+            global_primary_citations
+            and global_best_block_id
+            and (
+                (segment_is_weak and global_best_score > segment_best_score + 0.15)
+                or global_is_better
+                or global_is_much_better
+                or global_has_explicit_advantage
+            )
+        )
+
+        anchor_mode = "segment"
+        chosen_block_id = segment_best_block_id
+        chosen_score = segment_best_score
+        ordered: List[Dict[str, Any]]
+
+        if use_global_rescue:
+            anchor_mode = "global_rescue"
+            chosen_block_id = global_best_block_id
+            chosen_score = global_best_score
+            ordered = cls._dedupe_citations(global_primary_citations + candidate_citations)
+        elif segment_primary_citations:
+            ordered = cls._dedupe_citations(segment_primary_citations + candidate_citations)
+        else:
+            ordered = cls._dedupe_citations(candidate_citations)
+
+        chosen_page = cls._citation_page(ordered[0]) if ordered else None
+        segment_page = cls._citation_page(segment_primary_citations[0]) if segment_primary_citations else None
+        global_page = cls._citation_page(global_primary_citations[0]) if global_primary_citations else None
+        page_distance = None
+        if segment_page is not None and global_page is not None:
+            page_distance = abs(global_page - segment_page)
+
+        return {
+            "citations": ordered,
+            "chosen_block_id": chosen_block_id,
+            "chosen_score": max(0.0, float(chosen_score)),
+            "anchor_mode": anchor_mode,
+            "segment_best_score": segment_best_score,
+            "global_best_score": global_best_score,
+            "chosen_page": chosen_page,
+            "segment_page": segment_page,
+            "global_page": global_page,
+            "page_distance": page_distance,
+        }
 
     @staticmethod
     def _compact_retrieval_context(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1981,19 +2207,20 @@ class LegalReviewService:
             if not value and raw_text:
                 value = _value_from_block(field, raw_text)
             normalized_value, valid = _normalize_value_by_type(str(field.get("type") or "text"), value)
-            ordered_citations, evidence_block_id, evidence_score = self._prioritize_candidate_citations(
+            anchor_details = self._prioritize_candidate_citations(
                 selected_candidate=selected,
                 retrieval_block_by_id=retrieval_block_by_id,
                 value=value,
                 raw_text=raw_text,
             )
-            evidence_page = None
-            if ordered_citations:
-                raw_page = ordered_citations[0].get("page")
-                try:
-                    evidence_page = int(raw_page)
-                except (TypeError, ValueError):
-                    evidence_page = None
+            ordered_citations = anchor_details.get("citations") or []
+            evidence_block_id = anchor_details.get("chosen_block_id")
+            evidence_score = float(anchor_details.get("chosen_score") or 0.0)
+            evidence_page = anchor_details.get("chosen_page")
+            anchor_mode = str(anchor_details.get("anchor_mode") or "segment")
+            segment_best_score = float(anchor_details.get("segment_best_score") or 0.0)
+            global_best_score = float(anchor_details.get("global_best_score") or 0.0)
+            anchor_page_distance = anchor_details.get("page_distance")
 
             retrieval_score = float((selected.get("scores") or {}).get("final") or 0.0)
             base_confidence = float(primary.get("confidence") or 0.65)
@@ -2032,6 +2259,10 @@ class LegalReviewService:
                     evidence_block_id=evidence_block_id,
                     evidence_block_score=round(float(evidence_score), 4),
                     evidence_page=evidence_page,
+                    anchor_mode=anchor_mode,
+                    segment_best_score=round(segment_best_score, 4),
+                    global_best_score=round(global_best_score, 4),
+                    anchor_page_distance=anchor_page_distance,
                     citation_count=len(ordered_citations),
                 )
 
@@ -2049,6 +2280,12 @@ class LegalReviewService:
                 "retrieval_context": retrieval_context,
                 "verifier_status": verifier_status,
                 "uncertainty_reason": uncertainty_reason,
+                "_anchor_debug": {
+                    "anchor_mode": anchor_mode,
+                    "segment_best_score": segment_best_score,
+                    "global_best_score": global_best_score,
+                    "page_distance": anchor_page_distance,
+                },
             }
         except Exception as exc:
             _log_structured(

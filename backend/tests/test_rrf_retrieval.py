@@ -130,6 +130,41 @@ class RrfRetrievalTests(unittest.TestCase):
         self.assertGreaterEqual(confidence, 0.05)
         self.assertLessEqual(confidence, 0.98)
 
+    def test_structure_rank_is_table_only_bonus(self):
+        field = {"name": "Notice", "prompt": "notice period", "type": "text"}
+        non_table_blocks = [
+            _block("p1", "notice period for termination", "paragraph"),
+            _block("p2", "miscellaneous terms and conditions", "paragraph"),
+        ]
+        non_table_candidates = retrieve_legal_candidates(
+            blocks=non_table_blocks,
+            field=field,
+            doc_version_id="dv_demo",
+            query_embedding=None,
+            block_embeddings=None,
+            top_k=2,
+        )
+        self.assertTrue(non_table_candidates)
+        self.assertTrue(all(int(item["scores"].get("rank_structure") or 0) == 0 for item in non_table_candidates))
+
+        mixed_blocks = [
+            _block("p1", "notice period for termination", "paragraph"),
+            _block("t1", "notice | period | 30 days", "table"),
+            _block("p2", "miscellaneous terms and conditions", "paragraph"),
+        ]
+        mixed_candidates = retrieve_legal_candidates(
+            blocks=mixed_blocks,
+            field=field,
+            doc_version_id="dv_demo",
+            query_embedding=None,
+            block_embeddings=None,
+            top_k=3,
+        )
+        by_id = {item["block_id"]: item for item in mixed_candidates}
+        self.assertEqual(int(by_id["t1"]["scores"].get("rank_structure") or 0), 1)
+        self.assertEqual(int(by_id["p1"]["scores"].get("rank_structure") or 0), 0)
+        self.assertEqual(int(by_id["p2"]["scores"].get("rank_structure") or 0), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

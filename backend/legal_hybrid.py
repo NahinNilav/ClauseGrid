@@ -274,9 +274,8 @@ def retrieve_legal_candidates(
         ),
     )
     structure_ranked_rows = sorted(
-        block_rows,
+        [row for row in block_rows if bool(row.get("is_table"))],
         key=lambda row: (
-            -int(bool(row.get("is_table"))),
             -_safe_float(row.get("lexical_raw"), 0.0),
             -_safe_float(row.get("semantic"), 0.0),
             str(row.get("block_id") or ""),
@@ -286,6 +285,8 @@ def retrieve_legal_candidates(
     dense_rank_map = build_rank_map([str(row.get("block_id") or "") for row in dense_ranked_rows])
     lexical_rank_map = build_rank_map([str(row.get("block_id") or "") for row in lexical_ranked_rows])
     structure_rank_map = build_rank_map([str(row.get("block_id") or "") for row in structure_ranked_rows])
+    structure_applied_count = len(structure_rank_map)
+    non_table_only_query = structure_applied_count == 0
     rrf_raw_by_block_id = fuse_rrf(
         block_ids=block_ids,
         rank_maps=[dense_rank_map, lexical_rank_map, structure_rank_map],
@@ -344,6 +345,8 @@ def retrieve_legal_candidates(
             top_rank_dense=int(top_scores.get("rank_dense") or 0),
             top_rank_lexical=int(top_scores.get("rank_lexical") or 0),
             top_rank_structure=int(top_scores.get("rank_structure") or 0),
+            structure_applied_count=structure_applied_count,
+            non_table_only_query=non_table_only_query,
         )
     return candidates[: max(1, top_k)]
 

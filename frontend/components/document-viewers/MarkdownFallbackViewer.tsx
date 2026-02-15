@@ -1,19 +1,116 @@
 import React, { useEffect, useMemo, useRef } from 'react';
-import { ExtractionCell } from '../../types';
+import { ExtractionCell, SourceCitation } from '../../types';
 import { centerVerticalScroll, decodeBase64Utf8 } from './common';
 import { logRuntimeEvent } from '../../services/runtimeLogger';
 
 interface MarkdownFallbackViewerProps {
   contentBase64: string;
   cell?: ExtractionCell | null;
+  primaryCitation?: SourceCitation | null;
   fallbackReason?: string;
 }
 
 const escapeRegex = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+const expandIsoDateProbes = (value: string): string[] => {
+  const normalized = (value || '').trim();
+  const match = normalized.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return [];
+  const [, year, monthRaw, dayRaw] = match;
+  const month = Number(monthRaw);
+  const day = Number(dayRaw);
+  const monthNames = [
+    '',
+    'January',
+    'February',
+    'March',
+    'April',
+    'May',
+    'June',
+    'July',
+    'August',
+    'September',
+    'October',
+    'November',
+    'December',
+  ];
+  const monthShort = [
+    '',
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
+  ];
+  if (month < 1 || month >= monthNames.length) return [];
+  return [
+    `${monthNames[month]} ${day}, ${year}`,
+    `${monthShort[month]} ${day}, ${year}`,
+    `${day} ${monthNames[month]} ${year}`,
+    `${day} ${monthShort[month]} ${year}`,
+  ];
+};
+
+const quoteFragments = (quote: string): string[] => {
+  return (quote || '')
+    .split(/[\n.;]+/)
+    .map((part) => part.trim())
+    .filter((part) => part.length >= 18)
+    .slice(0, 4);
+};
+
+const findPageSectionBounds = (content: string, page?: number): { start: number; end: number } | null => {
+  if (!content || !page) return null;
+  const headerRegex = new RegExp(`^##\\s*Page\\s+${page}\\b`, 'im');
+  const startMatch = headerRegex.exec(content);
+  if (!startMatch || startMatch.index < 0) return null;
+  const start = startMatch.index;
+  const tail = content.slice(start + 1);
+  const nextHeader = /\n##\s*Page\s+\d+\b/i.exec(tail);
+  if (!nextHeader || nextHeader.index < 0) {
+    return { start, end: content.length };
+  }
+  return { start, end: start + 1 + nextHeader.index };
+};
+
+const findProbeMatchRange = (
+  content: string,
+  probe: string,
+  bounds?: { start: number; end: number } | null
+): { start: number; end: number } | null => {
+  const normalizedProbe = (probe || '').trim();
+  if (!normalizedProbe) return null;
+  const pattern = escapeRegex(normalizedProbe).replace(/\s+/g, '[\\s\\W]*');
+  const regex = new RegExp(pattern, 'i');
+  if (bounds) {
+    const scoped = content.slice(bounds.start, bounds.end);
+    const scopedMatch = regex.exec(scoped);
+    if (scopedMatch && scopedMatch.index >= 0) {
+      return {
+        start: bounds.start + scopedMatch.index,
+        end: bounds.start + scopedMatch.index + scopedMatch[0].length,
+      };
+    }
+  }
+  const fullMatch = regex.exec(content);
+  if (!fullMatch || fullMatch.index < 0) return null;
+  return {
+    start: fullMatch.index,
+    end: fullMatch.index + fullMatch[0].length,
+  };
+};
+
 export const MarkdownFallbackViewer: React.FC<MarkdownFallbackViewerProps> = ({
   contentBase64,
   cell,
+  primaryCitation,
   fallbackReason,
 }) => {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -28,36 +125,44 @@ export const MarkdownFallbackViewer: React.FC<MarkdownFallbackViewerProps> = ({
         .filter(Boolean),
     [cell?.citations]
   );
-  const highlightTarget = (cell?.quote || cell?.value || citationSnippets[0] || '').trim();
+  const dateProbes = useMemo(() => expandIsoDateProbes((cell?.value || '').trim()), [cell?.value]);
+  const quoteProbeFragments = useMemo(() => quoteFragments((cell?.quote || '').trim()), [cell?.quote]);
+  const probes = useMemo(
+    () =>
+      [
+        cell?.quote?.trim() || '',
+        ...quoteProbeFragments,
+        ...dateProbes,
+        cell?.value?.trim() || '',
+        ...citationSnippets,
+      ]
+        .map((probe) => probe.trim())
+        .filter(Boolean),
+    [cell?.quote, quoteProbeFragments, dateProbes, cell?.value, citationSnippets]
+  );
+  const highlightTarget = probes[0] || '';
 
-  const highlightedParts = useMemo(() => {
+  const highlightedMatch = useMemo(() => {
     if (!decodedContent || !highlightTarget) {
-      return { parts: [decodedContent], hasMatch: false, matcher: null as RegExp | null };
+      return { hasMatch: false, start: 0, end: 0 };
     }
-
-    const probes = [
-      cell?.quote?.trim() || '',
-      cell?.value?.trim() || '',
-      ...citationSnippets,
-      highlightTarget,
-      highlightTarget.replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ').trim(),
-    ].filter(Boolean);
+    const preferredPage = primaryCitation?.page || cell?.citations?.[0]?.page;
+    const pageBounds = findPageSectionBounds(decodedContent, preferredPage);
 
     for (const probe of probes) {
-      const regex = new RegExp(`(${escapeRegex(probe).replace(/\s+/g, '[\\s\\W]*')})`, 'gi');
-      const parts = decodedContent.split(regex);
-      if (parts.length > 1) {
-        return { parts, hasMatch: true, matcher: regex };
+      const range = findProbeMatchRange(decodedContent, probe, pageBounds);
+      if (range) {
+        return { hasMatch: true, start: range.start, end: range.end };
       }
     }
 
-    return { parts: [decodedContent], hasMatch: false, matcher: null as RegExp | null };
-  }, [decodedContent, highlightTarget, citationSnippets, cell?.quote, cell?.value]);
+    return { hasMatch: false, start: 0, end: 0 };
+  }, [decodedContent, highlightTarget, probes, primaryCitation?.page, cell?.citations]);
 
   useEffect(() => {
     renderTokenRef.current += 1;
     const token = renderTokenRef.current;
-    if (!highlightedParts.hasMatch || !scrollContainerRef.current) {
+    if (!highlightedMatch.hasMatch || !scrollContainerRef.current) {
       return;
     }
 
@@ -84,7 +189,7 @@ export const MarkdownFallbackViewer: React.FC<MarkdownFallbackViewerProps> = ({
     }, 120);
 
     return () => clearTimeout(timer);
-  }, [highlightedParts.hasMatch, cell?.citations]);
+  }, [highlightedMatch.hasMatch, cell?.citations]);
 
   return (
     <div ref={scrollContainerRef} className="h-full overflow-auto p-4 md:p-6 scroll-smooth">
@@ -97,31 +202,24 @@ export const MarkdownFallbackViewer: React.FC<MarkdownFallbackViewerProps> = ({
         <div className="bg-[#FFF4D6] border border-[#E5E7EB] rounded-lg p-2 mb-4 text-xs text-[#7A5A00]">
           Heuristic highlight mode: matching extracted text in converted preview.
         </div>
-        {!highlightedParts.hasMatch && highlightTarget && (
+        {!highlightedMatch.hasMatch && highlightTarget && (
           <div className="bg-[#F5F4F0] border border-[#E5E7EB] rounded-lg p-2 mb-4 text-xs text-[#8A8470]">
             Exact citation match not found in preview text.
           </div>
         )}
-        {highlightedParts.parts.map((part, idx) => {
-          const isMatch = highlightedParts.matcher ? highlightedParts.matcher.test(part) : false;
-          if (highlightedParts.matcher) {
-            highlightedParts.matcher.lastIndex = 0;
-          }
-
-          if (!isMatch) {
-            return <React.Fragment key={idx}>{part}</React.Fragment>;
-          }
-
-          return (
+        {!highlightedMatch.hasMatch && decodedContent}
+        {highlightedMatch.hasMatch && (
+          <>
+            {decodedContent.slice(0, highlightedMatch.start)}
             <mark
-              key={idx}
               data-citation-primary="1"
               className="bg-[#D8DCE5] text-black px-0.5 rounded-sm border-b-2 border-[#8B97AD] font-medium"
             >
-              {part}
+              {decodedContent.slice(highlightedMatch.start, highlightedMatch.end)}
             </mark>
-          );
-        })}
+            {decodedContent.slice(highlightedMatch.end)}
+          </>
+        )}
       </div>
     </div>
   );

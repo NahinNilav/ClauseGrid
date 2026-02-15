@@ -41,6 +41,7 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({ document, cell }
     <MarkdownFallbackViewer
       contentBase64={document.content}
       cell={cell}
+      primaryCitation={primaryCitation}
       fallbackReason={
         format === 'pdf' && !document.sourceContentBase64
           ? 'Original PDF bytes unavailable; using heuristic text-preview highlighting.'

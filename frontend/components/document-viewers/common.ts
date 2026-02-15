@@ -21,6 +21,52 @@ const normalizeForMatch = (value: string): string =>
     .replace(/[^\w\s]/g, ' ')
     .trim();
 
+const expandIsoDateProbes = (value: string): string[] => {
+  const normalized = (value || '').trim();
+  const match = normalized.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return [];
+  const [, year, monthRaw, dayRaw] = match;
+  const month = Number(monthRaw);
+  const day = Number(dayRaw);
+  const monthNames = [
+    '',
+    'January',
+    'February',
+    'March',
+    'April',
+    'May',
+    'June',
+    'July',
+    'August',
+    'September',
+    'October',
+    'November',
+    'December',
+  ];
+  const monthShort = [
+    '',
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
+  ];
+  if (month < 1 || month >= monthNames.length) return [];
+  return [
+    `${monthNames[month]} ${day}, ${year}`,
+    `${monthShort[month]} ${day}, ${year}`,
+    `${day} ${monthNames[month]} ${year}`,
+    `${day} ${monthShort[month]} ${year}`,
+  ];
+};
+
 const overlapScore = (left: string, right: string): number => {
   const leftTokens = new Set(normalizeForMatch(left).split(' ').filter((token) => token.length > 2));
   const rightTokens = new Set(normalizeForMatch(right).split(' ').filter((token) => token.length > 2));
@@ -43,6 +89,7 @@ const scoreCitationAgainstCell = (
   const quoteProbe = (cell.quote || '').trim();
   const valueProbe = (cell.value || '').trim();
   const reasoningProbe = (cell.reasoning || '').trim().slice(0, 280);
+  const dateProbes = expandIsoDateProbes(valueProbe);
   const snippet = (citation.snippet || '').trim();
   const normSnippet = normalizeForMatch(snippet);
   let score = 0;
@@ -65,6 +112,13 @@ const scoreCitationAgainstCell = (
     if (reasoningProbe) {
       score += 0.8 * overlapScore(snippet, reasoningProbe);
     }
+    dateProbes.forEach((probe) => {
+      score += 1.1 * overlapScore(snippet, probe);
+      const normProbe = normalizeForMatch(probe);
+      if (normProbe && normSnippet.includes(normProbe)) {
+        score += 1.5;
+      }
+    });
   }
 
   if (citation.bbox?.length === 4) score += 0.25;
@@ -72,6 +126,20 @@ const scoreCitationAgainstCell = (
   if (typeof cell.page === 'number' && citation.page === cell.page) score += 0.3;
 
   return score;
+};
+
+const pickPrimaryCitationWithScore = (
+  citations: SourceCitation[] | undefined,
+  cell?: ExtractionCell | null
+): { citation: SourceCitation | null; score: number } => {
+  const citation = pickPrimaryCitation(citations, cell);
+  if (!citation) {
+    return { citation: null, score: 0 };
+  }
+  return {
+    citation,
+    score: scoreCitationAgainstCell(citation, cell),
+  };
 };
 
 export const pickPrimaryCitation = (
@@ -145,12 +213,51 @@ const pickBestBlockForCell = (document: DocumentFile, cell?: ExtractionCell | nu
   return bestScore >= 0.2 ? bestBlock : null;
 };
 
+const pickBestCitationFromArtifact = (
+  document: DocumentFile,
+  cell?: ExtractionCell | null
+): { citation: SourceCitation | null; score: number } => {
+  const blocks = document.artifact?.blocks || [];
+  if (!blocks.length || !cell) {
+    return { citation: null, score: 0 };
+  }
+
+  const probes = [cell.quote, cell.value]
+    .map((value) => (value || '').trim())
+    .filter(Boolean) as string[];
+  probes.push(...expandIsoDateProbes((cell.value || '').trim()));
+
+  let bestCitation: SourceCitation | null = null;
+  let bestScore = 0;
+  blocks.forEach((block) => {
+    if (!block?.citations?.length) return;
+    const blockScore = scoreBlockAgainstCell(block, probes, cell.page);
+    block.citations.forEach((citation) => {
+      const citationScore = scoreCitationAgainstCell(citation, cell);
+      const combinedScore = citationScore + 0.35 * blockScore;
+      if (combinedScore > bestScore) {
+        bestCitation = citation;
+        bestScore = combinedScore;
+      }
+    });
+  });
+
+  return { citation: bestCitation, score: bestScore };
+};
+
 export const resolvePrimaryCitation = (
   document: DocumentFile,
   cell?: ExtractionCell | null
 ): SourceCitation | null => {
-  const direct = pickPrimaryCitation(cell?.citations, cell);
-  if (direct) return direct;
+  const direct = pickPrimaryCitationWithScore(cell?.citations, cell);
+  const globalCandidate = pickBestCitationFromArtifact(document, cell);
+
+  if (globalCandidate.citation && globalCandidate.score >= Math.max(0.35, direct.score + 0.55)) {
+    return globalCandidate.citation;
+  }
+  if (direct.citation) {
+    return direct.citation;
+  }
 
   const bestBlock = pickBestBlockForCell(document, cell);
   return pickPrimaryCitation(bestBlock?.citations, cell);
