@@ -77,6 +77,8 @@ OpenAI Configuration (default provider)
   - `OPENAI_EMBEDDING_MODEL` (default: `text-embedding-3-small`)
 
 Relevant Segment Extraction (RSE) Configuration (hybrid/llm_reasoning retrieval)
+- Retrieval rank fusion:
+  - `LEGAL_RRF_K` (default: `60`) for Reciprocal Rank Fusion over dense + lexical + structure rank lists.
 - `LEGAL_RSE_ENABLED` (default: `true`)
 - `LEGAL_RSE_WINDOW_RADIUS` (default: `2`)  
   Builds context windows as `prev N + seed block + next N`.

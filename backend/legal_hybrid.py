@@ -7,6 +7,7 @@ import os
 import random
 import re
 import time
+from collections import Counter
 from typing import Any, Dict, List, Tuple
 
 try:
@@ -60,6 +61,18 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _env_int(name: str, default: int, *, minimum: int = 1, maximum: int | None = None) -> int:
+    raw = os.getenv(name)
+    try:
+        value = int(raw) if raw is not None else int(default)
+    except (TypeError, ValueError):
+        value = int(default)
+    value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
 def _cosine(left: List[float], right: List[float]) -> float:
     if not left or not right:
         return 0.0
@@ -92,6 +105,80 @@ def _expand_legal_query(field: Dict[str, Any]) -> str:
     return _normalize_space(" ".join([base] + expansions))
 
 
+def bm25_like_scores(
+    *,
+    query_tokens: List[str],
+    documents_tokens: List[List[str]],
+    k1: float = 1.2,
+    b: float = 0.75,
+) -> List[float]:
+    if not documents_tokens:
+        return []
+
+    normalized_query_tokens = [token for token in query_tokens if token]
+    if not normalized_query_tokens:
+        return [0.0 for _ in documents_tokens]
+
+    doc_term_counts = [Counter(tokens) for tokens in documents_tokens]
+    doc_lengths = [len(tokens) for tokens in documents_tokens]
+    avg_doc_length = (sum(doc_lengths) / len(doc_lengths)) if doc_lengths else 1.0
+    avg_doc_length = max(1.0, avg_doc_length)
+
+    query_term_counts = Counter(normalized_query_tokens)
+    doc_freq_by_term: Dict[str, int] = {}
+    for term in query_term_counts.keys():
+        doc_freq_by_term[term] = sum(1 for counter in doc_term_counts if counter.get(term, 0) > 0)
+
+    total_docs = len(documents_tokens)
+    output: List[float] = []
+    for counter, doc_len in zip(doc_term_counts, doc_lengths):
+        score = 0.0
+        for term, query_tf in query_term_counts.items():
+            term_tf = float(counter.get(term, 0))
+            if term_tf <= 0:
+                continue
+            df = doc_freq_by_term.get(term, 0)
+            idf = math.log(1.0 + ((total_docs - df + 0.5) / (df + 0.5)))
+            denominator = term_tf + k1 * (1.0 - b + b * (doc_len / avg_doc_length))
+            if denominator <= 0:
+                continue
+            score += float(query_tf) * idf * ((term_tf * (k1 + 1.0)) / denominator)
+        output.append(score)
+    return output
+
+
+def build_rank_map(block_ids_in_rank_order: List[str]) -> Dict[str, int]:
+    rank_map: Dict[str, int] = {}
+    for idx, block_id in enumerate(block_ids_in_rank_order, start=1):
+        if block_id not in rank_map:
+            rank_map[block_id] = idx
+    return rank_map
+
+
+def rrf_score(rank: int, k: int) -> float:
+    if rank <= 0:
+        return 0.0
+    return 1.0 / float(k + rank)
+
+
+def fuse_rrf(
+    *,
+    block_ids: List[str],
+    rank_maps: List[Dict[str, int]],
+    k: int,
+) -> Dict[str, float]:
+    fused: Dict[str, float] = {}
+    for block_id in block_ids:
+        total = 0.0
+        for rank_map in rank_maps:
+            rank = rank_map.get(block_id)
+            if rank is None:
+                continue
+            total += rrf_score(rank, k)
+        fused[block_id] = total
+    return fused
+
+
 def retrieve_legal_candidates(
     *,
     blocks: List[Dict[str, Any]],
@@ -102,9 +189,12 @@ def retrieve_legal_candidates(
     top_k: int = 6,
 ) -> List[Dict[str, Any]]:
     query = _expand_legal_query(field)
-    query_tokens = _token_set(query)
+    query_tokens = _tokenize(query)
     hash_query_embedding: List[float] | None = None
-    candidates: List[Dict[str, Any]] = []
+    rrf_k = _env_int("LEGAL_RRF_K", 60, minimum=1, maximum=10000)
+    block_rows: List[Dict[str, Any]] = []
+    block_ids: List[str] = []
+    lexical_documents: List[List[str]] = []
 
     for idx, block in enumerate(blocks or []):
         if not isinstance(block, dict):
@@ -113,9 +203,8 @@ def retrieve_legal_candidates(
         if not text:
             continue
 
-        text_tokens = _token_set(text)
-        overlap = len(query_tokens & text_tokens) / max(1, len(query_tokens))
-
+        block_id = str(block.get("block_id") or block.get("id") or f"idx_{idx}")
+        block_tokens = _tokenize(text)
         block_embedding = None
         if block_embeddings and idx < len(block_embeddings):
             block_embedding = block_embeddings[idx]
@@ -127,9 +216,6 @@ def retrieve_legal_candidates(
                 hash_query_embedding = _hash_embedding(query)
             semantic = _cosine(hash_query_embedding, _hash_embedding(text))
 
-        structure_prior = 0.1 if block.get("type") == "table" else 0.0
-        final_score = 0.5 * semantic + 0.3 * overlap + 0.2 * structure_prior
-
         citations: List[Dict[str, Any]] = []
         for citation in block.get("citations") or []:
             if not isinstance(citation, dict):
@@ -138,22 +224,127 @@ def retrieve_legal_candidates(
             payload["doc_version_id"] = doc_version_id
             citations.append(payload)
 
-        candidates.append(
+        block_type = str(block.get("type") or "paragraph")
+        is_table = block_type == "table"
+        block_rows.append(
             {
-                "block_id": str(block.get("block_id") or block.get("id") or f"idx_{idx}"),
-                "block_type": block.get("type") or "paragraph",
+                "block_id": block_id,
+                "block_type": block_type,
                 "text": text[:8000],
                 "citations": citations,
+                "tokens": block_tokens,
+                "semantic": semantic,
+                "is_table": is_table,
+            }
+        )
+        block_ids.append(block_id)
+        lexical_documents.append(block_tokens)
+
+    if not block_rows:
+        return []
+
+    lexical_raw_scores = bm25_like_scores(
+        query_tokens=query_tokens,
+        documents_tokens=lexical_documents,
+        k1=1.2,
+        b=0.75,
+    )
+    max_lexical_raw = max(lexical_raw_scores) if lexical_raw_scores else 0.0
+
+    for idx, row in enumerate(block_rows):
+        lexical_raw = lexical_raw_scores[idx] if idx < len(lexical_raw_scores) else 0.0
+        row["lexical_raw"] = lexical_raw
+        row["lexical"] = (lexical_raw / max_lexical_raw) if max_lexical_raw > 0 else 0.0
+        row["structure"] = 0.1 if row.get("is_table") else 0.0
+
+    dense_ranked_rows = sorted(
+        block_rows,
+        key=lambda row: (
+            -_safe_float(row.get("semantic"), 0.0),
+            -_safe_float(row.get("lexical_raw"), 0.0),
+            str(row.get("block_id") or ""),
+        ),
+    )
+    lexical_ranked_rows = sorted(
+        block_rows,
+        key=lambda row: (
+            -_safe_float(row.get("lexical_raw"), 0.0),
+            -_safe_float(row.get("semantic"), 0.0),
+            str(row.get("block_id") or ""),
+        ),
+    )
+    structure_ranked_rows = sorted(
+        block_rows,
+        key=lambda row: (
+            -int(bool(row.get("is_table"))),
+            -_safe_float(row.get("lexical_raw"), 0.0),
+            -_safe_float(row.get("semantic"), 0.0),
+            str(row.get("block_id") or ""),
+        ),
+    )
+
+    dense_rank_map = build_rank_map([str(row.get("block_id") or "") for row in dense_ranked_rows])
+    lexical_rank_map = build_rank_map([str(row.get("block_id") or "") for row in lexical_ranked_rows])
+    structure_rank_map = build_rank_map([str(row.get("block_id") or "") for row in structure_ranked_rows])
+    rrf_raw_by_block_id = fuse_rrf(
+        block_ids=block_ids,
+        rank_maps=[dense_rank_map, lexical_rank_map, structure_rank_map],
+        k=rrf_k,
+    )
+    max_rrf_raw = max(rrf_raw_by_block_id.values()) if rrf_raw_by_block_id else 0.0
+
+    candidates: List[Dict[str, Any]] = []
+    for row in block_rows:
+        block_id = str(row.get("block_id") or "")
+        rrf_raw = _safe_float(rrf_raw_by_block_id.get(block_id), 0.0)
+        final_score = (rrf_raw / max_rrf_raw) if max_rrf_raw > 0 else 0.0
+        candidates.append(
+            {
+                "block_id": block_id,
+                "block_type": row.get("block_type") or "paragraph",
+                "text": row.get("text") or "",
+                "citations": row.get("citations") or [],
                 "scores": {
-                    "semantic": round(semantic, 4),
-                    "lexical": round(overlap, 4),
-                    "structure": round(structure_prior, 4),
+                    "semantic": round(_safe_float(row.get("semantic"), 0.0), 4),
+                    "lexical": round(_safe_float(row.get("lexical"), 0.0), 4),
+                    "structure": round(_safe_float(row.get("structure"), 0.0), 4),
                     "final": round(final_score, 4),
+                    "lexical_raw": round(_safe_float(row.get("lexical_raw"), 0.0), 6),
+                    "rrf_raw": round(rrf_raw, 6),
+                    "rrf_k": int(rrf_k),
+                    "rank_dense": int(dense_rank_map.get(block_id) or 0),
+                    "rank_lexical": int(lexical_rank_map.get(block_id) or 0),
+                    "rank_structure": int(structure_rank_map.get(block_id) or 0),
                 },
             }
         )
 
-    candidates.sort(key=lambda c: c["scores"]["final"], reverse=True)
+    candidates.sort(
+        key=lambda candidate: (
+            -_safe_float((candidate.get("scores") or {}).get("final"), 0.0),
+            -_safe_float((candidate.get("scores") or {}).get("rrf_raw"), 0.0),
+            _safe_float((candidate.get("scores") or {}).get("rank_dense"), float("inf")),
+            str(candidate.get("block_id") or ""),
+        )
+    )
+    if candidates:
+        top_scores = candidates[0].get("scores") or {}
+        _log_structured(
+            logging.INFO,
+            "retrieve_candidates_ranked",
+            scoring_mode="rrf",
+            rrf_k=rrf_k,
+            field_key=str(field.get("key") or field.get("id") or field.get("name") or ""),
+            doc_version_id=doc_version_id,
+            candidate_count=len(candidates),
+            requested_top_k=max(1, int(top_k)),
+            top_block_id=candidates[0].get("block_id"),
+            top_final=_safe_float(top_scores.get("final"), 0.0),
+            top_rrf_raw=_safe_float(top_scores.get("rrf_raw"), 0.0),
+            top_rank_dense=int(top_scores.get("rank_dense") or 0),
+            top_rank_lexical=int(top_scores.get("rank_lexical") or 0),
+            top_rank_structure=int(top_scores.get("rank_structure") or 0),
+        )
     return candidates[: max(1, top_k)]
 
 

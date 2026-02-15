@@ -136,12 +136,13 @@ Per document-version:
 ### 8.4 Candidate ranking
 For each field:
 1. Query is expanded from field metadata (`name + prompt + type`) plus legal synonym expansion.
-2. Candidate scoring uses:
-   - semantic cosine similarity (query embedding vs block embedding)
-   - lexical token overlap
-   - table structure prior
-3. Final score formula:
-   - `final = 0.5*semantic + 0.3*lexical + 0.2*structure_prior`
+2. Three ranked lists are produced per block:
+   - dense semantic cosine similarity (query embedding vs block embedding)
+   - lexical BM25-ish ranking over query/document tokens
+   - structure ranking (table-first, then lexical/dense tie-breakers)
+3. Ranks are fused with Reciprocal Rank Fusion (RRF):
+   - `rrf_raw = Σ 1 / (k + rank_i)`, with `k=60` by default (`LEGAL_RRF_K`)
+   - normalized retrieval score: `final = rrf_raw / max_rrf_raw_for_query`
 4. If embeddings are unavailable, semantic similarity falls back to local 256-dim hash embeddings.
 5. In hybrid/llm_reasoning retrieval, top block pools are fetched first (`80/60/40` for `high/balanced/fast`).
 6. Relevant Segment Extraction (RSE) assembles contiguous windows around each seed hit (`prev2 + self + next2` by default), deduplicates overlapping windows, and reranks segments.

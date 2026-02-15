@@ -273,7 +273,7 @@ LEGAL_SYNONYMS = {
 
 ### 4.1 Multi-Signal Retrieval
 
-The retrieval system combines three signals:
+The retrieval system builds three ranked lists and fuses them with **Reciprocal Rank Fusion (RRF)**:
 
 ```python
 # legal_hybrid.py
@@ -281,38 +281,20 @@ def retrieve_legal_candidates(
     blocks, field, doc_version_id,
     block_embeddings, query_embedding, top_k=6
 ) -> List[Dict]:
-    candidates = []
+    # Signal 1: Dense semantic ranking (cosine similarity)
+    dense_scores = cosine_rank(query_embedding, block_embeddings)
     
-    for idx, block in enumerate(blocks):
-        # Signal 1: Semantic similarity (cosine)
-        if query_embedding and block_embeddings[idx]:
-            semantic = _cosine(query_embedding, block_embeddings[idx])
-        else:
-            semantic = _cosine(_hash_embedding(query), _hash_embedding(block["text"]))
-        
-        # Signal 2: Lexical overlap (token intersection)
-        query_tokens = _token_set(query)
-        text_tokens = _token_set(block["text"])
-        lexical = len(query_tokens & text_tokens) / max(1, len(query_tokens))
-        
-        # Signal 3: Structure prior (tables get bonus)
-        structure = 0.1 if block["type"] == "table" else 0.0
-        
-        # Weighted combination
-        final_score = 0.5 * semantic + 0.3 * lexical + 0.2 * structure
-        
-        candidates.append({
-            "block_id": block["id"],
-            "text": block["text"],
-            "citations": block["citations"],
-            "scores": {
-                "semantic": semantic,
-                "lexical": lexical,
-                "structure": structure,
-                "final": final_score,
-            }
-        })
-    
+    # Signal 2: Lexical ranking (BM25-ish)
+    lexical_raw = bm25_like_scores(query_tokens, document_tokens)
+    lexical_rank = sort_desc(lexical_raw)
+
+    # Signal 3: Structure ranking (table-first)
+    structure_rank = sort_desc(is_table, lexical_raw, dense_scores)
+
+    # RRF fusion
+    rrf_raw = 1/(k + rank_dense) + 1/(k + rank_lexical) + 1/(k + rank_structure)
+    final = rrf_raw / max_rrf_raw_for_query  # normalized to [0,1]
+
     return sorted(candidates, key=lambda c: c["scores"]["final"], reverse=True)[:top_k]
 ```
 
@@ -339,13 +321,18 @@ def assemble_relevant_segments(
     return top_ranked_segments
 ```
 
-### 4.3 Score Weights
+### 4.3 Rank Fusion (RRF)
 
-| Signal | Weight | Purpose |
-|--------|--------|---------|
-| Semantic | 0.5 | Captures meaning similarity |
-| Lexical | 0.3 | Ensures keyword presence |
-| Structure | 0.2 | Prioritizes tabular data |
+| Signal list | Rank strategy | Purpose |
+|-------------|---------------|---------|
+| Dense | Cosine similarity descending | Captures semantic similarity |
+| Lexical | BM25-ish score descending | Rewards exact/repeated term matches |
+| Structure | Table-first, then lexical/dense tie-breakers | Prioritizes table evidence without score-scale distortion |
+
+RRF fusion uses:
+- `rrf_raw = Σ 1 / (k + rank_i)` across dense, lexical, and structure lists
+- default `k = 60` (`LEGAL_RRF_K`)
+- normalized score: `final = rrf_raw / max_rrf_raw_for_query`
 
 ### 4.4 Fallback Hash Embedding
 
@@ -704,9 +691,15 @@ block_embedding = cached_embeddings["block_47"]  # 1536-dim vector
     "text": "8.2 Termination for Cause. Either party may terminate...",
     "scores": {
         "semantic": 0.847,    # High cosine similarity
-        "lexical": 0.625,     # Keyword overlap
+        "lexical": 0.784,     # Normalized BM25-ish lexical strength
         "structure": 0.0,     # Not a table
-        "final": 0.611,       # Weighted: 0.5*0.847 + 0.3*0.625 + 0.2*0.0
+        "lexical_raw": 2.481233,
+        "rrf_raw": 0.048403,
+        "rrf_k": 60,
+        "rank_dense": 1,
+        "rank_lexical": 2,
+        "rank_structure": 3,
+        "final": 0.93,        # Normalized RRF score in [0,1]
     }
 }
 ```
@@ -721,7 +714,7 @@ Return ONLY JSON with keys: value, raw_text, evidence_summary, candidate_index, 
 Field: {"key": "termination_notice_period", "name": "Termination Notice Period", "type": "text", "prompt": "How many days notice is required to terminate the agreement for cause?"}
 
 Evidence candidates: [
-  {"candidate_index": 0, "text": "8.2 Termination for Cause. Either party may terminate this Agreement upon thirty (30) days written notice...", "page": 5, "score": 0.611}
+  {"candidate_index": 0, "text": "8.2 Termination for Cause. Either party may terminate this Agreement upon thirty (30) days written notice...", "page": 5, "score": 0.93}
 ]
 ```
 
@@ -751,13 +744,13 @@ Evidence candidates: [
 ```python
 confidence = confidence_from_signals(
     base_confidence=0.92,      # LLM confidence
-    retrieval_score=0.611,     # Best candidate score
+    retrieval_score=0.93,      # Best normalized RRF score
     verifier_status="PASS",    # +0.15 bonus
     self_consistent=True,      # +0.08 bonus (high mode)
 )
-# = 0.45*0.92 + 0.35*0.611 + 0.15 + 0.08
-# = 0.414 + 0.214 + 0.15 + 0.08
-# = 0.858 → rounded to 0.86
+# = 0.45*0.92 + 0.35*0.93 + 0.15 + 0.08
+# = 0.414 + 0.326 + 0.15 + 0.08
+# = 0.970 → rounded to 0.97
 ```
 
 #### Stage 7: Table Cell Output
@@ -916,7 +909,7 @@ The Hybrid Extraction Pipeline combines:
 
 1. **Docling** for robust document parsing with positional citations
 2. **OpenAI embeddings** for semantic understanding
-3. **Hybrid retrieval** balancing semantic, lexical, and structural signals
+3. **RRF-based hybrid retrieval** fusing dense, BM25-ish lexical, and structure rankings
 4. **LLM extraction** with structured JSON output
 5. **Verification LLM** for cross-validation
 6. **Multi-signal confidence scoring** for transparency
