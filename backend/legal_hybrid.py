@@ -14,8 +14,18 @@ try:
 except Exception:  # pragma: no cover - optional dependency in local envs
     genai = None
 
+try:
+    from openai import OpenAI
+except Exception:  # pragma: no cover - optional dependency in local envs
+    OpenAI = None
+
 
 logger = logging.getLogger("tabular.server")
+
+
+def _log_structured(level: int, event: str, **fields: Any) -> None:
+    payload = {"event": event, **fields}
+    logger.log(level, json.dumps(payload, default=str))
 
 
 LEGAL_SYNONYMS: Dict[str, List[str]] = {
@@ -77,19 +87,19 @@ def _expand_legal_query(field: Dict[str, Any]) -> str:
 
 def retrieve_legal_candidates(
     *,
-    artifact: Dict[str, Any],
+    blocks: List[Dict[str, Any]],
     field: Dict[str, Any],
     doc_version_id: str,
+    block_embeddings: List[List[float] | None] | None = None,
+    query_embedding: List[float] | None = None,
     top_k: int = 6,
 ) -> List[Dict[str, Any]]:
     query = _expand_legal_query(field)
     query_tokens = _token_set(query)
-    query_embedding = _hash_embedding(query)
-
-    blocks = artifact.get("blocks") or []
+    hash_query_embedding: List[float] | None = None
     candidates: List[Dict[str, Any]] = []
 
-    for block in blocks:
+    for idx, block in enumerate(blocks or []):
         if not isinstance(block, dict):
             continue
         text = _normalize_space(str(block.get("text") or ""))
@@ -98,7 +108,18 @@ def retrieve_legal_candidates(
 
         text_tokens = _token_set(text)
         overlap = len(query_tokens & text_tokens) / max(1, len(query_tokens))
-        semantic = _cosine(query_embedding, _hash_embedding(text))
+
+        block_embedding = None
+        if block_embeddings and idx < len(block_embeddings):
+            block_embedding = block_embeddings[idx]
+
+        if query_embedding and block_embedding:
+            semantic = _cosine(query_embedding, block_embedding)
+        else:
+            if hash_query_embedding is None:
+                hash_query_embedding = _hash_embedding(query)
+            semantic = _cosine(hash_query_embedding, _hash_embedding(text))
+
         structure_prior = 0.1 if block.get("type") == "table" else 0.0
         final_score = 0.5 * semantic + 0.3 * overlap + 0.2 * structure_prior
 
@@ -112,7 +133,7 @@ def retrieve_legal_candidates(
 
         candidates.append(
             {
-                "block_id": block.get("id"),
+                "block_id": str(block.get("block_id") or block.get("id") or f"idx_{idx}"),
                 "block_type": block.get("type") or "paragraph",
                 "text": text[:8000],
                 "citations": citations,
@@ -204,8 +225,7 @@ class GeminiLegalClient:
 
     @staticmethod
     def _log_structured(level: int, event: str, **fields: Any) -> None:
-        payload = {"event": event, **fields}
-        logger.log(level, json.dumps(payload, default=str))
+        _log_structured(level, event, **fields)
 
     def _generate(
         self,
@@ -443,6 +463,377 @@ class GeminiLegalClient:
             "best_candidate_index": max(0, min(best_candidate_index, max(0, len(candidates) - 1))),
             "model_name": self.verifier_model,
         }
+
+
+class OpenAILegalClient:
+    _REASONING_EFFORT_VALUES = {"none", "minimal", "low", "medium", "high", "xhigh"}
+
+    def __init__(self) -> None:
+        self.api_key = os.getenv("OPENAI_API_KEY")
+        self.extraction_model_fast = os.getenv("OPENAI_EXTRACTION_MODEL_FAST", "gpt-5-mini")
+        self.extraction_model_pro = os.getenv("OPENAI_EXTRACTION_MODEL_PRO", "gpt-5.2")
+        self.verifier_model = os.getenv("OPENAI_VERIFIER_MODEL", "gpt-5-nano")
+        self.extraction_model = self.extraction_model_fast
+        self.reasoning_effort_fast = self._normalize_reasoning_effort(
+            os.getenv("OPENAI_REASONING_EFFORT_FAST", "medium"),
+            default="medium",
+        )
+        self.reasoning_effort_pro = self._normalize_reasoning_effort(
+            os.getenv("OPENAI_REASONING_EFFORT_PRO", "medium"),
+            default="medium",
+        )
+        self.reasoning_effort_verifier = self._normalize_reasoning_effort(
+            os.getenv("OPENAI_REASONING_EFFORT_VERIFIER", "low"),
+            default="low",
+        )
+        self.client = None
+        if OpenAI is not None and self.api_key:
+            try:
+                self.client = OpenAI(api_key=self.api_key)
+            except Exception:
+                self.client = None
+        _log_structured(
+            logging.INFO,
+            "openai_llm_client_initialized",
+            enabled=self.enabled,
+            extraction_model_fast=self.extraction_model_fast,
+            extraction_model_pro=self.extraction_model_pro,
+            verifier_model=self.verifier_model,
+            reasoning_effort_fast=self.reasoning_effort_fast,
+            reasoning_effort_pro=self.reasoning_effort_pro,
+            reasoning_effort_verifier=self.reasoning_effort_verifier,
+        )
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.client is not None and self.api_key)
+
+    @classmethod
+    def _normalize_reasoning_effort(cls, value: str, *, default: str) -> str:
+        effort = _normalize_space(value).lower()
+        if effort in cls._REASONING_EFFORT_VALUES:
+            return effort
+        return default
+
+    def _model_for_quality(self, quality_profile: str) -> Tuple[str, str]:
+        profile = (quality_profile or "fast").lower()
+        if profile == "high":
+            return self.extraction_model_pro, self.reasoning_effort_pro
+        return self.extraction_model_fast, self.reasoning_effort_fast
+
+    @staticmethod
+    def _extract_response_text(response: Any) -> str:
+        text = str(getattr(response, "output_text", "") or "").strip()
+        if text:
+            return text
+
+        output = getattr(response, "output", None)
+        if output is None and isinstance(response, dict):
+            output = response.get("output")
+
+        recovered: List[str] = []
+        for item in output or []:
+            item_type = item.get("type") if isinstance(item, dict) else getattr(item, "type", None)
+            if item_type != "message":
+                continue
+            content = item.get("content") if isinstance(item, dict) else getattr(item, "content", None)
+            for part in content or []:
+                part_type = part.get("type") if isinstance(part, dict) else getattr(part, "type", None)
+                if part_type != "output_text":
+                    continue
+                part_text = part.get("text") if isinstance(part, dict) else getattr(part, "text", None)
+                if part_text:
+                    recovered.append(str(part_text))
+        return "\n".join(recovered).strip()
+
+    def _generate(
+        self,
+        *,
+        operation: str,
+        model: str,
+        prompt: str,
+        reasoning_effort: str,
+    ) -> str:
+        if not self.enabled:
+            raise RuntimeError("OpenAI client is unavailable. Install openai and set OPENAI_API_KEY.")
+        started_at = time.time()
+        _log_structured(
+            logging.INFO,
+            "openai_llm_request_started",
+            operation=operation,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            prompt_chars=len(prompt or ""),
+        )
+        try:
+            response = self.client.responses.create(
+                model=model,
+                input=prompt,
+                reasoning={"effort": reasoning_effort},
+            )
+        except Exception as exc:
+            _log_structured(
+                logging.ERROR,
+                "openai_llm_request_failed",
+                operation=operation,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            raise RuntimeError(f"OpenAI request failed for {operation}: {exc}") from exc
+
+        text = self._extract_response_text(response)
+        if not text:
+            raise RuntimeError("OpenAI returned empty content")
+
+        usage = getattr(response, "usage", None)
+        input_tokens = getattr(usage, "input_tokens", None) if usage is not None else None
+        output_tokens = getattr(usage, "output_tokens", None) if usage is not None else None
+        reasoning_tokens = None
+        if usage is not None:
+            output_details = getattr(usage, "output_tokens_details", None)
+            if output_details is not None:
+                reasoning_tokens = getattr(output_details, "reasoning_tokens", None)
+
+        _log_structured(
+            logging.INFO,
+            "openai_llm_request_completed",
+            operation=operation,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            latency_ms=round((time.time() - started_at) * 1000, 2),
+            output_chars=len(text),
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            reasoning_tokens=reasoning_tokens,
+        )
+        return text
+
+    def extract(
+        self,
+        *,
+        field: Dict[str, Any],
+        candidates: List[Dict[str, Any]],
+        quality_profile: str,
+    ) -> Dict[str, Any]:
+        model, reasoning_effort = self._model_for_quality(quality_profile)
+        _log_structured(
+            logging.INFO,
+            "openai_extract_started",
+            field_key=str(field.get("key") or field.get("id") or field.get("name") or ""),
+            quality_profile=quality_profile,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            candidate_count=len(candidates),
+        )
+        evidence = []
+        for idx, candidate in enumerate(candidates):
+            citation = (candidate.get("citations") or [{}])[0]
+            evidence.append(
+                {
+                    "candidate_index": idx,
+                    "text": candidate.get("text") or "",
+                    "page": citation.get("page"),
+                    "selector": citation.get("selector"),
+                    "score": candidate.get("scores", {}).get("final"),
+                }
+            )
+
+        prompt = (
+            "You are extracting legal fields from evidence snippets. "
+            "Return ONLY JSON with keys: value, raw_text, evidence_summary, candidate_index, confidence.\n"
+            "Rules: cite only from provided snippets, do not fabricate, keep value concise and field-typed.\n"
+            f"Field: {json.dumps(field)}\n"
+            f"Quality profile: {quality_profile}\n"
+            f"Evidence candidates: {json.dumps(evidence)}"
+        )
+        text = self._generate(
+            operation="extract",
+            model=model,
+            prompt=prompt,
+            reasoning_effort=reasoning_effort,
+        )
+        payload = GeminiLegalClient._extract_json_object(text)
+        value = str(payload.get("value") or "").strip()
+        raw_text = str(payload.get("raw_text") or "").strip()
+        evidence_summary = str(payload.get("evidence_summary") or "").strip()
+        candidate_index = payload.get("candidate_index")
+        try:
+            candidate_index = int(candidate_index)
+        except (TypeError, ValueError):
+            candidate_index = 0
+        confidence = payload.get("confidence")
+        try:
+            confidence = float(confidence)
+        except (TypeError, ValueError):
+            confidence = 0.65
+        return {
+            "value": value,
+            "raw_text": raw_text or value,
+            "evidence_summary": evidence_summary or "LLM extracted value from retrieved legal evidence.",
+            "candidate_index": max(0, min(candidate_index, max(0, len(candidates) - 1))),
+            "confidence": max(0.0, min(1.0, confidence)),
+            "model_name": model,
+        }
+
+    def verify(
+        self,
+        *,
+        field: Dict[str, Any],
+        value: str,
+        raw_text: str,
+        candidates: List[Dict[str, Any]],
+        quality_profile: str = "fast",
+    ) -> Dict[str, Any]:
+        _log_structured(
+            logging.INFO,
+            "openai_verify_started",
+            field_key=str(field.get("key") or field.get("id") or field.get("name") or ""),
+            quality_profile=quality_profile,
+            model=self.verifier_model,
+            reasoning_effort=self.reasoning_effort_verifier,
+            candidate_count=len(candidates),
+        )
+        evidence = []
+        for idx, candidate in enumerate(candidates):
+            evidence.append(
+                {
+                    "candidate_index": idx,
+                    "text": candidate.get("text") or "",
+                }
+            )
+        prompt = (
+            "You are verifying a legal extraction against evidence snippets. "
+            "Return ONLY JSON with keys: verifier_status, reason, best_candidate_index.\n"
+            "verifier_status must be PASS, PARTIAL, or FAIL.\n"
+            f"Field: {json.dumps(field)}\n"
+            f"Claimed value: {value}\n"
+            f"Claimed raw_text: {raw_text}\n"
+            f"Evidence: {json.dumps(evidence)}"
+        )
+        text = self._generate(
+            operation="verify",
+            model=self.verifier_model,
+            prompt=prompt,
+            reasoning_effort=self.reasoning_effort_verifier,
+        )
+        payload = GeminiLegalClient._extract_json_object(text)
+        status = str(payload.get("verifier_status") or "PARTIAL").upper()
+        if status not in {"PASS", "PARTIAL", "FAIL"}:
+            status = "PARTIAL"
+        reason = str(payload.get("reason") or "").strip() or "Verifier returned no specific reason."
+        best_candidate_index = payload.get("best_candidate_index")
+        try:
+            best_candidate_index = int(best_candidate_index)
+        except (TypeError, ValueError):
+            best_candidate_index = 0
+        return {
+            "verifier_status": status,
+            "reason": reason,
+            "best_candidate_index": max(0, min(best_candidate_index, max(0, len(candidates) - 1))),
+            "model_name": self.verifier_model,
+        }
+
+
+class OpenAIEmbeddingClient:
+    def __init__(self) -> None:
+        self.api_key = os.getenv("OPENAI_API_KEY")
+        self.model = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+        try:
+            self.batch_size = max(1, int(os.getenv("OPENAI_EMBEDDING_BATCH_SIZE", "64")))
+        except ValueError:
+            self.batch_size = 64
+        self.client = None
+        if OpenAI is not None and self.api_key:
+            try:
+                self.client = OpenAI(api_key=self.api_key)
+            except Exception:
+                self.client = None
+        _log_structured(
+            logging.INFO,
+            "openai_embedding_client_initialized",
+            enabled=self.enabled,
+            model=self.model,
+            batch_size=self.batch_size,
+        )
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.client is not None and self.api_key)
+
+    @staticmethod
+    def _clean_text(value: str) -> str:
+        text = _normalize_space(value)
+        return text if text else " "
+
+    def embed_texts(self, texts: List[str]) -> List[List[float]]:
+        if not texts:
+            return []
+        if not self.enabled:
+            raise RuntimeError("OpenAI embeddings are unavailable. Install openai and set OPENAI_API_KEY.")
+
+        started_at = time.time()
+        _log_structured(
+            logging.INFO,
+            "openai_embedding_started",
+            model=self.model,
+            text_count=len(texts),
+            batch_size=self.batch_size,
+        )
+        embeddings: List[List[float]] = []
+        for start in range(0, len(texts), self.batch_size):
+            chunk = [self._clean_text(text) for text in texts[start : start + self.batch_size]]
+            chunk_started_at = time.time()
+            try:
+                response = self.client.embeddings.create(
+                    model=self.model,
+                    input=chunk,
+                )
+            except Exception as exc:
+                _log_structured(
+                    logging.ERROR,
+                    "openai_embedding_failed",
+                    model=self.model,
+                    chunk_start_index=start,
+                    chunk_size=len(chunk),
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+                raise RuntimeError(f"OpenAI embedding request failed: {exc}") from exc
+
+            chunk_vectors: List[List[float] | None] = [None] * len(chunk)
+            for item in response.data or []:
+                index = item.get("index") if isinstance(item, dict) else getattr(item, "index", None)
+                vector = item.get("embedding") if isinstance(item, dict) else getattr(item, "embedding", None)
+                try:
+                    target_index = int(index)
+                except (TypeError, ValueError):
+                    continue
+                if target_index < 0 or target_index >= len(chunk):
+                    continue
+                chunk_vectors[target_index] = [float(v) for v in (vector or [])]
+
+            for vector in chunk_vectors:
+                embeddings.append(vector or [])
+            _log_structured(
+                logging.INFO,
+                "openai_embedding_chunk_completed",
+                model=self.model,
+                chunk_start_index=start,
+                chunk_size=len(chunk),
+                latency_ms=round((time.time() - chunk_started_at) * 1000, 2),
+            )
+
+        _log_structured(
+            logging.INFO,
+            "openai_embedding_completed",
+            model=self.model,
+            text_count=len(texts),
+            vector_count=len(embeddings),
+            latency_ms=round((time.time() - started_at) * 1000, 2),
+        )
+        return embeddings
 
 
 def confidence_from_signals(

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import logging
+import os
 import re
 import uuid
 from datetime import datetime
@@ -7,11 +10,17 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from legal_hybrid import (
     GeminiLegalClient,
+    OpenAIEmbeddingClient,
+    OpenAILegalClient,
+    _expand_legal_query,
     confidence_from_signals,
     retrieve_legal_candidates,
     self_consistency_agreement,
 )
 from legal_db import db, utc_now_iso
+
+
+logger = logging.getLogger("tabular.server")
 
 
 PROJECT_STATUS = {"DRAFT", "ACTIVE", "ARCHIVED"}
@@ -25,6 +34,15 @@ FALLBACK_REASON = {"NOT_FOUND", "AMBIGUOUS", "PARSER_ERROR", "MODEL_ERROR"}
 EXTRACTION_MODE = {"deterministic", "hybrid", "llm_reasoning"}
 QUALITY_PROFILE = {"high", "balanced", "fast"}
 VERIFIER_STATUS = {"PASS", "PARTIAL", "FAIL", "SKIPPED"}
+
+
+def _log_structured(level: int, event: str, **fields: Any) -> None:
+    payload = {"event": event, **fields}
+    logger.log(level, json.dumps(payload, default=str))
+
+
+def _debug_logging_enabled() -> bool:
+    return str(os.getenv("LEGAL_DEBUG_LOGGING", "0")).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _new_id(prefix: str) -> str:
@@ -221,7 +239,33 @@ def _citations_with_doc_version(
 class LegalReviewService:
     def __init__(self) -> None:
         self.db = db
-        self.llm_client = GeminiLegalClient()
+        self.llm_provider = self._resolve_llm_provider()
+        self.llm_client = self._build_llm_client(self.llm_provider)
+        self.embedding_client = OpenAIEmbeddingClient()
+        _log_structured(
+            logging.INFO,
+            "legal_service_initialized",
+            llm_provider=self.llm_provider,
+            llm_client_type=type(self.llm_client).__name__,
+            llm_enabled=bool(getattr(self.llm_client, "enabled", False)),
+            embedding_client_type=type(self.embedding_client).__name__,
+            embedding_enabled=bool(getattr(self.embedding_client, "enabled", False)),
+            embedding_model=str(getattr(self.embedding_client, "model", "")),
+            debug_logging=_debug_logging_enabled(),
+        )
+
+    @staticmethod
+    def _resolve_llm_provider() -> str:
+        provider = str(os.getenv("LEGAL_LLM_PROVIDER", "openai") or "openai").strip().lower()
+        if provider not in {"openai", "gemini"}:
+            return "openai"
+        return provider
+
+    @staticmethod
+    def _build_llm_client(provider: str):
+        if provider == "gemini":
+            return GeminiLegalClient()
+        return OpenAILegalClient()
 
     # Project
     def create_project(self, *, name: str, description: str | None = None) -> Dict[str, Any]:
@@ -856,7 +900,7 @@ class LegalReviewService:
         if not template_version:
             raise ValueError("Template version not found")
         selected_mode = mode if mode in EXTRACTION_MODE else "hybrid"
-        selected_quality_profile = quality_profile if quality_profile in QUALITY_PROFILE else "high"
+        selected_quality_profile = quality_profile if quality_profile in QUALITY_PROFILE else "fast"
         run = {
             "id": _new_id("run"),
             "project_id": project_id,
@@ -957,7 +1001,35 @@ class LegalReviewService:
         documents = self.latest_document_versions_for_project(run["project_id"])
         latest_versions = [doc for doc in documents if doc.get("latest_version")]
         fields = template_version.get("fields_json") or []
+        try:
+            query_embeddings_by_field_index = self._build_field_query_embeddings(fields)
+        except Exception:
+            query_embeddings_by_field_index = {}
+            _log_structured(
+                logging.WARNING,
+                "field_query_embedding_precompute_failed",
+                run_id=run_id,
+                project_id=run["project_id"],
+                template_version_id=run["template_version_id"],
+                field_count=len(fields),
+            )
         total_cells = len(latest_versions) * len(fields)
+        _log_structured(
+            logging.INFO,
+            "extraction_run_started",
+            run_id=run_id,
+            project_id=run["project_id"],
+            template_version_id=run["template_version_id"],
+            mode=str(run.get("mode") or "hybrid"),
+            quality_profile=str(run.get("quality_profile") or "fast"),
+            document_count=len(latest_versions),
+            field_count=len(fields),
+            total_cells=total_cells,
+            llm_provider=self.llm_provider,
+            llm_enabled=bool(getattr(self.llm_client, "enabled", False)),
+            embedding_enabled=bool(getattr(self.embedding_client, "enabled", False)),
+            query_embedding_count=len(query_embeddings_by_field_index),
+        )
 
         self.db.execute(
             """
@@ -980,7 +1052,7 @@ class LegalReviewService:
             version = doc["latest_version"]
             doc_version_id = version["id"]
             artifact = version.get("artifact") or {}
-            for field in fields:
+            for field_index, field in enumerate(fields):
                 if task_id and self.is_task_canceled(task_id):
                     self.mark_extraction_run_canceled(
                         run_id,
@@ -1015,7 +1087,8 @@ class LegalReviewService:
                     artifact=artifact,
                     doc_version_id=doc_version_id,
                     mode=str(run.get("mode") or "hybrid"),
-                    quality_profile=str(run.get("quality_profile") or "high"),
+                    quality_profile=str(run.get("quality_profile") or "fast"),
+                    query_embedding=query_embeddings_by_field_index.get(field_index),
                 )
                 if result["fallback_reason"]:
                     failed += 1
@@ -1110,6 +1183,16 @@ class LegalReviewService:
                     "failed_cells": run_row["failed_cells"],
                 },
             )
+            _log_structured(
+                logging.INFO,
+                "extraction_run_completed",
+                run_id=run_id,
+                project_id=run_row["project_id"],
+                status=run_row["status"],
+                completed_cells=run_row["completed_cells"],
+                failed_cells=run_row["failed_cells"],
+                total_cells=run_row["total_cells"],
+            )
         return run_row or {}
 
     def mark_extraction_run_failed(self, run_id: str, error_message: str) -> None:
@@ -1174,12 +1257,23 @@ class LegalReviewService:
         artifact: Dict[str, Any],
         doc_version_id: str,
         mode: str = "hybrid",
-        quality_profile: str = "high",
+        quality_profile: str = "fast",
+        query_embedding: List[float] | None = None,
     ) -> Dict[str, Any]:
         selected_mode = mode if mode in EXTRACTION_MODE else "hybrid"
-        selected_quality_profile = quality_profile if quality_profile in QUALITY_PROFILE else "high"
+        selected_quality_profile = quality_profile if quality_profile in QUALITY_PROFILE else "fast"
+        field_key = str(field.get("key") or field.get("id") or field.get("name") or "")
 
         if selected_mode == "deterministic":
+            if _debug_logging_enabled():
+                _log_structured(
+                    logging.INFO,
+                    "field_extraction_mode_selected",
+                    doc_version_id=doc_version_id,
+                    field_key=field_key,
+                    mode=selected_mode,
+                    quality_profile=selected_quality_profile,
+                )
             return self._extract_field_cell_deterministic(field=field, artifact=artifact, doc_version_id=doc_version_id)
 
         llm_result = self._extract_field_cell_llm(
@@ -1188,11 +1282,32 @@ class LegalReviewService:
             doc_version_id=doc_version_id,
             mode=selected_mode,
             quality_profile=selected_quality_profile,
+            query_embedding=query_embedding,
         )
         if llm_result:
+            if _debug_logging_enabled():
+                _log_structured(
+                    logging.INFO,
+                    "field_extraction_mode_selected",
+                    doc_version_id=doc_version_id,
+                    field_key=field_key,
+                    mode=selected_mode,
+                    quality_profile=selected_quality_profile,
+                    extraction_method=llm_result.get("extraction_method"),
+                    model_name=llm_result.get("model_name"),
+                )
             return llm_result
 
         if selected_mode == "llm_reasoning":
+            _log_structured(
+                logging.WARNING,
+                "field_extraction_llm_reasoning_failed",
+                doc_version_id=doc_version_id,
+                field_key=field_key,
+                mode=selected_mode,
+                quality_profile=selected_quality_profile,
+                llm_provider=self.llm_provider,
+            )
             return {
                 "raw_text": "",
                 "value": "",
@@ -1209,6 +1324,15 @@ class LegalReviewService:
                 "uncertainty_reason": "LLM unavailable or returned invalid payload.",
             }
 
+        _log_structured(
+            logging.INFO,
+            "field_extraction_hybrid_fallback_deterministic",
+            doc_version_id=doc_version_id,
+            field_key=field_key,
+            mode=selected_mode,
+            quality_profile=selected_quality_profile,
+            llm_provider=self.llm_provider,
+        )
         deterministic = self._extract_field_cell_deterministic(field=field, artifact=artifact, doc_version_id=doc_version_id)
         deterministic["uncertainty_reason"] = (
             deterministic.get("uncertainty_reason") or "Hybrid mode fell back to deterministic extraction."
@@ -1301,6 +1425,174 @@ class LegalReviewService:
             )
         return compact
 
+    def _build_retrieval_blocks(
+        self,
+        artifact: Dict[str, Any],
+        doc_version_id: str,
+    ) -> List[Dict[str, Any]]:
+        raw_blocks = artifact.get("blocks") or []
+        if not isinstance(raw_blocks, list):
+            return []
+
+        normalized_blocks: List[Dict[str, Any]] = []
+        seen_block_ids: set[str] = set()
+        for idx, block in enumerate(raw_blocks):
+            if not isinstance(block, dict):
+                continue
+            text = _normalize_space(str(block.get("text") or ""))
+            if not text:
+                continue
+
+            base_block_id = str(block.get("id") or f"idx_{idx}")
+            block_id = base_block_id
+            if block_id in seen_block_ids:
+                block_id = f"{base_block_id}_{idx}"
+            seen_block_ids.add(block_id)
+
+            citations = _citations_with_doc_version(block.get("citations") or [], doc_version_id)
+            normalized_blocks.append(
+                {
+                    "block_id": block_id,
+                    "id": block_id,
+                    "type": block.get("type") or "paragraph",
+                    "text": text[:8000],
+                    "citations": citations,
+                }
+            )
+
+        return normalized_blocks
+
+    def _get_or_create_block_embeddings(
+        self,
+        doc_version_id: str,
+        blocks: List[Dict[str, Any]],
+    ) -> List[List[float] | None]:
+        if not blocks:
+            return []
+        if not self.embedding_client.enabled:
+            _log_structured(
+                logging.INFO,
+                "embedding_cache_skipped_client_disabled",
+                doc_version_id=doc_version_id,
+                block_count=len(blocks),
+            )
+            return [None for _ in blocks]
+
+        model = self.embedding_client.model
+        existing_rows = self.db.fetch_all(
+            """
+            SELECT block_id, embedding_json
+            FROM document_block_embeddings
+            WHERE document_version_id=:document_version_id
+              AND model=:model
+            """,
+            {"document_version_id": doc_version_id, "model": model},
+        )
+        existing: Dict[str, List[float]] = {}
+        for row in existing_rows:
+            block_id = str(row.get("block_id") or "")
+            embedding_value = row.get("embedding_json")
+            if isinstance(embedding_value, list) and embedding_value:
+                try:
+                    existing[block_id] = [float(item) for item in embedding_value]
+                except (TypeError, ValueError):
+                    continue
+
+        missing_blocks: List[Dict[str, Any]] = []
+        missing_texts: List[str] = []
+        for block in blocks:
+            block_id = str(block.get("block_id") or block.get("id") or "")
+            if not block_id:
+                continue
+            if block_id in existing:
+                continue
+            missing_blocks.append(block)
+            missing_texts.append(str(block.get("text") or ""))
+
+        if missing_texts:
+            try:
+                embedded_missing = self.embedding_client.embed_texts(missing_texts)
+            except Exception:
+                embedded_missing = []
+                _log_structured(
+                    logging.WARNING,
+                    "embedding_cache_compute_failed",
+                    doc_version_id=doc_version_id,
+                    model=model,
+                    missing_count=len(missing_texts),
+                )
+            timestamp = utc_now_iso()
+            upserts: List[Dict[str, Any]] = []
+            for block, vector in zip(missing_blocks, embedded_missing):
+                block_id = str(block.get("block_id") or block.get("id") or "")
+                if not block_id or not vector:
+                    continue
+                existing[block_id] = vector
+                upserts.append(
+                    {
+                        "document_version_id": doc_version_id,
+                        "block_id": block_id,
+                        "model": model,
+                        "embedding_json": vector,
+                        "created_at": timestamp,
+                    }
+                )
+            if upserts:
+                self.db.executemany(
+                    """
+                    INSERT OR REPLACE INTO document_block_embeddings(
+                        document_version_id, block_id, model, embedding_json, created_at
+                    )
+                    VALUES(
+                        :document_version_id, :block_id, :model, :embedding_json, :created_at
+                    )
+                    """,
+                    upserts,
+                )
+
+        _log_structured(
+            logging.INFO,
+            "embedding_cache_stats",
+            doc_version_id=doc_version_id,
+            model=model,
+            block_count=len(blocks),
+            cached_count=len(existing_rows),
+            missing_count=len(missing_blocks),
+            stored_count=len(existing),
+        )
+
+        aligned: List[List[float] | None] = []
+        for block in blocks:
+            block_id = str(block.get("block_id") or block.get("id") or "")
+            aligned.append(existing.get(block_id))
+        return aligned
+
+    def _build_field_query_embeddings(self, fields: List[Dict[str, Any]]) -> Dict[int, List[float]]:
+        if not fields or not self.embedding_client.enabled:
+            if fields:
+                _log_structured(
+                    logging.INFO,
+                    "field_query_embedding_skipped",
+                    field_count=len(fields),
+                    embedding_enabled=bool(self.embedding_client.enabled),
+                )
+            return {}
+
+        queries = [_expand_legal_query(field) for field in fields]
+        vectors = self.embedding_client.embed_texts(queries)
+        output: Dict[int, List[float]] = {}
+        for idx, vector in enumerate(vectors):
+            if vector:
+                output[idx] = vector
+        _log_structured(
+            logging.INFO,
+            "field_query_embeddings_built",
+            field_count=len(fields),
+            embedded_count=len(output),
+            model=str(getattr(self.embedding_client, "model", "")),
+        )
+        return output
+
     def _extract_field_cell_llm(
         self,
         *,
@@ -1309,16 +1601,42 @@ class LegalReviewService:
         doc_version_id: str,
         mode: str,
         quality_profile: str,
+        query_embedding: List[float] | None = None,
     ) -> Optional[Dict[str, Any]]:
         top_k = 8 if quality_profile == "high" else (6 if quality_profile == "balanced" else 4)
+        field_key = str(field.get("key") or field.get("id") or field.get("name") or "")
+        blocks = self._build_retrieval_blocks(artifact, doc_version_id)
+        block_embeddings = self._get_or_create_block_embeddings(doc_version_id, blocks)
         candidates = retrieve_legal_candidates(
-            artifact=artifact,
+            blocks=blocks,
             field=field,
             doc_version_id=doc_version_id,
+            block_embeddings=block_embeddings,
+            query_embedding=query_embedding,
             top_k=top_k,
         )
         retrieval_context = self._compact_retrieval_context(candidates)
+        if _debug_logging_enabled():
+            top_score = float((candidates[0].get("scores") or {}).get("final") or 0.0) if candidates else 0.0
+            _log_structured(
+                logging.INFO,
+                "llm_field_retrieval",
+                doc_version_id=doc_version_id,
+                field_key=field_key,
+                quality_profile=quality_profile,
+                block_count=len(blocks),
+                block_embedding_count=sum(1 for value in block_embeddings if value),
+                candidate_count=len(candidates),
+                top_score=round(top_score, 4),
+            )
         if not candidates:
+            _log_structured(
+                logging.INFO,
+                "llm_field_no_candidates",
+                doc_version_id=doc_version_id,
+                field_key=field_key,
+                quality_profile=quality_profile,
+            )
             return {
                 "raw_text": "",
                 "value": "",
@@ -1336,6 +1654,14 @@ class LegalReviewService:
             }
 
         if not self.llm_client.enabled:
+            _log_structured(
+                logging.INFO,
+                "llm_field_skipped_client_disabled",
+                doc_version_id=doc_version_id,
+                field_key=field_key,
+                quality_profile=quality_profile,
+                llm_provider=self.llm_provider,
+            )
             return None
 
         try:
@@ -1350,9 +1676,11 @@ class LegalReviewService:
 
             if verifier.get("verifier_status") == "FAIL":
                 expanded_candidates = retrieve_legal_candidates(
-                    artifact=artifact,
+                    blocks=blocks,
                     field=field,
                     doc_version_id=doc_version_id,
+                    block_embeddings=block_embeddings,
+                    query_embedding=query_embedding,
                     top_k=12,
                 )
                 if expanded_candidates:
@@ -1417,6 +1745,22 @@ class LegalReviewService:
             elif verifier_status == "PARTIAL":
                 uncertainty_reason = str(verifier.get("reason") or "Verifier marked extraction as partially supported.")
 
+            if _debug_logging_enabled():
+                _log_structured(
+                    logging.INFO,
+                    "llm_field_result",
+                    doc_version_id=doc_version_id,
+                    field_key=field_key,
+                    quality_profile=quality_profile,
+                    model_name=str(primary.get("model_name") or self.llm_client.extraction_model),
+                    verifier_status=verifier_status,
+                    confidence_score=confidence,
+                    selected_candidate_index=candidate_index,
+                    selected_candidate_score=round(float((selected.get("scores") or {}).get("final") or 0.0), 4),
+                    fallback_reason=fallback_reason,
+                    self_consistent=self_consistent,
+                )
+
             return {
                 "raw_text": raw_text[:5000],
                 "value": value,
@@ -1433,6 +1777,17 @@ class LegalReviewService:
                 "uncertainty_reason": uncertainty_reason,
             }
         except Exception as exc:
+            _log_structured(
+                logging.ERROR,
+                "llm_field_failed",
+                doc_version_id=doc_version_id,
+                field_key=field_key,
+                quality_profile=quality_profile,
+                mode=mode,
+                llm_provider=self.llm_provider,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             if mode == "hybrid":
                 return None
             return {

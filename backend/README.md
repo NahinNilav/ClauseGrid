@@ -55,9 +55,28 @@ Database
   - ground_truth_sets, ground_truth_labels, evaluation_runs
   - request_tasks, audit_events
 
-Gemini Configuration (Hybrid / LLM Modes)
-- Install deps from `backend/requirements.txt` (includes `google-genai`).
-- Set `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) for backend LLM extraction.
+LLM Provider Configuration (Hybrid / LLM Modes)
+- Install deps from `backend/requirements.txt` (includes `openai` and `google-genai`).
+- `LEGAL_LLM_PROVIDER` controls the backend LLM provider:
+  - `openai` (default)
+  - `gemini`
+- There is no automatic provider fallback. If the selected provider is unavailable, hybrid mode falls back to deterministic extraction.
+
+OpenAI Configuration (default provider)
+- Required for OpenAI LLM + embeddings:
+  - `OPENAI_API_KEY`
+- Optional model/effort overrides:
+  - `OPENAI_EXTRACTION_MODEL_FAST` (default: `gpt-5-mini`)
+  - `OPENAI_EXTRACTION_MODEL_PRO` (default: `gpt-5.2`)
+  - `OPENAI_VERIFIER_MODEL` (default: `gpt-5-nano`)
+  - `OPENAI_REASONING_EFFORT_FAST` (default: `medium`)
+  - `OPENAI_REASONING_EFFORT_PRO` (default: `medium`)
+  - `OPENAI_REASONING_EFFORT_VERIFIER` (default: `low`)
+  - `OPENAI_EMBEDDING_MODEL` (default: `text-embedding-3-small`)
+
+Gemini Configuration (optional provider)
+- Required only when `LEGAL_LLM_PROVIDER=gemini`:
+  - `GEMINI_API_KEY` (or `GOOGLE_API_KEY`)
 - Optional model overrides:
   - `LEGAL_EXTRACTION_MODEL` (default: `gemini-3-pro-preview`)
   - `LEGAL_EXTRACTION_FAST_MODEL` (default: `gemini-3-flash-preview`)

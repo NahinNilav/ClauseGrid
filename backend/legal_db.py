@@ -109,7 +109,7 @@ class SQLiteDB:
                         project_id TEXT NOT NULL,
                         template_version_id TEXT NOT NULL,
                         mode TEXT NOT NULL DEFAULT 'hybrid',
-                        quality_profile TEXT NOT NULL DEFAULT 'high',
+                        quality_profile TEXT NOT NULL DEFAULT 'fast',
                         status TEXT NOT NULL,
                         total_cells INTEGER NOT NULL DEFAULT 0,
                         completed_cells INTEGER NOT NULL DEFAULT 0,
@@ -153,6 +153,19 @@ class SQLiteDB:
 
                     CREATE INDEX IF NOT EXISTS idx_field_extractions_lookup
                     ON field_extractions(project_id, template_version_id, document_version_id, field_key);
+
+                    CREATE TABLE IF NOT EXISTS document_block_embeddings (
+                        document_version_id TEXT NOT NULL,
+                        block_id TEXT NOT NULL,
+                        model TEXT NOT NULL,
+                        embedding_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        PRIMARY KEY(document_version_id, block_id, model),
+                        FOREIGN KEY(document_version_id) REFERENCES document_versions(id) ON DELETE CASCADE
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_document_block_embeddings_lookup
+                    ON document_block_embeddings(document_version_id, model);
 
                     CREATE TABLE IF NOT EXISTS review_decisions (
                         id TEXT PRIMARY KEY,
@@ -258,7 +271,7 @@ class SQLiteDB:
                     """
                 )
                 self._ensure_column(conn, "extraction_runs", "mode", "TEXT NOT NULL DEFAULT 'hybrid'")
-                self._ensure_column(conn, "extraction_runs", "quality_profile", "TEXT NOT NULL DEFAULT 'high'")
+                self._ensure_column(conn, "extraction_runs", "quality_profile", "TEXT NOT NULL DEFAULT 'fast'")
                 self._ensure_column(
                     conn,
                     "field_extractions",

@@ -4,7 +4,7 @@
 Deliver a project-centric legal review workflow:
 `upload -> parse -> configure fields -> extract -> review -> evaluate`
 
-The implemented main feature uses backend `/api/*` workflow APIs and backend extraction modes (`hybrid`, `deterministic`, `llm_reasoning`).
+The implemented main feature uses backend `/api/*` workflow APIs and backend extraction modes (`hybrid`, `deterministic`, `llm_reasoning`) with OpenAI as the default LLM provider.
 
 Legacy frontend-direct Gemini extraction is explicitly not part of this main workflow.
 
@@ -36,6 +36,9 @@ Legacy frontend-direct Gemini extraction is explicitly not part of this main wor
 - Run extraction from Table tab with:
   - mode: `hybrid`, `deterministic`, `llm_reasoning`
   - quality profile: `high`, `balanced`, `fast`
+- Default quality profile is `fast`.
+- Hybrid retrieval uses persisted OpenAI embeddings cache when available (`document_block_embeddings`).
+- LLM provider is explicit (`LEGAL_LLM_PROVIDER=openai|gemini`), default `openai`.
 - Poll task status until terminal.
 - Refresh table to inspect extracted cells.
 

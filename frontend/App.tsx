@@ -180,7 +180,7 @@ const App: React.FC = () => {
   const [error, setError] = useState<string>('');
   const [busy, setBusy] = useState<boolean>(false);
   const [extractionMode, setExtractionMode] = useState<ExtractionMode>('hybrid');
-  const [qualityProfile, setQualityProfile] = useState<QualityProfile>('high');
+  const [qualityProfile, setQualityProfile] = useState<QualityProfile>('fast');
   const [showUnresolvedOnly, setShowUnresolvedOnly] = useState<boolean>(false);
   const [showLowConfidenceOnly, setShowLowConfidenceOnly] = useState<boolean>(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);

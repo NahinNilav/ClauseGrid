@@ -19,10 +19,21 @@ cd backend
 
 Optional environment variables:
 - `LEGAL_REVIEW_DB` (SQLite path override)
-- `GEMINI_API_KEY` or `GOOGLE_API_KEY` (for LLM-enabled modes)
-- `LEGAL_EXTRACTION_MODEL`
-- `LEGAL_EXTRACTION_FAST_MODEL`
-- `LEGAL_VERIFIER_MODEL`
+- `LEGAL_LLM_PROVIDER` (`openai` default, or `gemini`)
+- OpenAI (default provider):
+  - `OPENAI_API_KEY`
+  - `OPENAI_EXTRACTION_MODEL_FAST` (default `gpt-5-mini`)
+  - `OPENAI_EXTRACTION_MODEL_PRO` (default `gpt-5.2`)
+  - `OPENAI_VERIFIER_MODEL` (default `gpt-5-nano`)
+  - `OPENAI_REASONING_EFFORT_FAST` (default `medium`)
+  - `OPENAI_REASONING_EFFORT_PRO` (default `medium`)
+  - `OPENAI_REASONING_EFFORT_VERIFIER` (default `low`)
+  - `OPENAI_EMBEDDING_MODEL` (default `text-embedding-3-small`)
+- Gemini (optional provider when `LEGAL_LLM_PROVIDER=gemini`):
+  - `GEMINI_API_KEY` or `GOOGLE_API_KEY`
+  - `LEGAL_EXTRACTION_MODEL`
+  - `LEGAL_EXTRACTION_FAST_MODEL`
+  - `LEGAL_VERIFIER_MODEL`
 
 ### Frontend
 ```bash
@@ -40,6 +51,7 @@ Default frontend API target:
 3. Wait for parse task completion.
 4. Create template or template version.
 5. Wait for auto-triggered extraction (or run extraction manually).
+   - Default extraction quality profile is `fast`.
 6. Open table view and complete review decisions.
 7. Add optional annotations.
 8. Create ground truth and run evaluation.
