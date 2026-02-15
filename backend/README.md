@@ -74,6 +74,26 @@ OpenAI Configuration (default provider)
   - `OPENAI_REASONING_EFFORT_VERIFIER` (default: `low`)
   - `OPENAI_EMBEDDING_MODEL` (default: `text-embedding-3-small`)
 
+Relevant Segment Extraction (RSE) Configuration (hybrid/llm_reasoning retrieval)
+- `LEGAL_RSE_ENABLED` (default: `true`)
+- `LEGAL_RSE_WINDOW_RADIUS` (default: `2`)  
+  Builds context windows as `prev N + seed block + next N`.
+- `LEGAL_RSE_MAX_SEGMENT_CHARS` (default: `12000`)
+- `LEGAL_RSE_MAX_CITATIONS` (default: `32`)
+- Candidate pool sizes before segment assembly:
+  - `LEGAL_RSE_POOL_K_HIGH` (default: `80`)
+  - `LEGAL_RSE_POOL_K_BALANCED` (default: `60`)
+  - `LEGAL_RSE_POOL_K_FAST` (default: `40`)
+  - Expanded retry pools on verifier fail:
+    - `LEGAL_RSE_POOL_K_HIGH_EXPANDED` (default: `120`)
+    - `LEGAL_RSE_POOL_K_BALANCED_EXPANDED` (default: `90`)
+    - `LEGAL_RSE_POOL_K_FAST_EXPANDED` (default: `60`)
+- Segment counts sent to extractor:
+  - `LEGAL_RSE_TOP_SEGMENTS_HIGH` (default: `10`)
+  - `LEGAL_RSE_TOP_SEGMENTS_BALANCED` (default: `8`)
+  - `LEGAL_RSE_TOP_SEGMENTS_FAST` (default: `6`)
+  - `LEGAL_RSE_TOP_SEGMENTS_EXPANDED` (default: `12`)
+
 Gemini Configuration (optional provider)
 - Required only when `LEGAL_LLM_PROVIDER=gemini`:
   - `GEMINI_API_KEY` (or `GOOGLE_API_KEY`)

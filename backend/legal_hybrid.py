@@ -53,6 +53,13 @@ def _token_set(value: str) -> set[str]:
     return set(_tokenize(value))
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _cosine(left: List[float], right: List[float]) -> float:
     if not left or not right:
         return 0.0
@@ -148,6 +155,179 @@ def retrieve_legal_candidates(
 
     candidates.sort(key=lambda c: c["scores"]["final"], reverse=True)
     return candidates[: max(1, top_k)]
+
+
+def _dedupe_citations(citations: List[Dict[str, Any]], *, max_items: int = 32) -> List[Dict[str, Any]]:
+    output: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for citation in citations:
+        if not isinstance(citation, dict):
+            continue
+        key = json.dumps(citation, sort_keys=True, default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(citation)
+        if len(output) >= max(1, max_items):
+            break
+    return output
+
+
+def _merge_segment_text(
+    blocks: List[Dict[str, Any]],
+    *,
+    max_chars: int,
+) -> str:
+    parts: List[str] = []
+    for block in blocks:
+        text = _normalize_space(str(block.get("text") or ""))
+        if not text:
+            continue
+        block_id = str(block.get("block_id") or block.get("id") or "")
+        block_type = str(block.get("type") or "paragraph")
+        prefix = f"[{block_id}:{block_type}] " if block_id else ""
+        parts.append(f"{prefix}{text}")
+
+    merged = "\n\n".join(parts).strip()
+    if len(merged) > max_chars:
+        return merged[:max_chars].rstrip()
+    return merged
+
+
+def assemble_relevant_segments(
+    *,
+    blocks: List[Dict[str, Any]],
+    ranked_candidates: List[Dict[str, Any]],
+    window_radius: int = 2,
+    max_segments: int = 8,
+    max_chars: int = 12000,
+    max_citations: int = 32,
+) -> List[Dict[str, Any]]:
+    """Assemble contiguous context windows around high-scoring retrieval hits.
+
+    This is a query-time context assembler (RSE-like) that groups neighboring
+    blocks into short segments before LLM extraction.
+    """
+
+    if not blocks or not ranked_candidates or max_segments <= 0:
+        return []
+
+    radius = max(0, int(window_radius))
+    char_limit = max(1, int(max_chars))
+    citations_limit = max(1, int(max_citations))
+
+    index_by_block_id: Dict[str, int] = {}
+    for idx, block in enumerate(blocks):
+        block_id = str(block.get("block_id") or block.get("id") or f"idx_{idx}")
+        index_by_block_id[block_id] = idx
+
+    score_by_block_id: Dict[str, Dict[str, float]] = {}
+    span_state: Dict[Tuple[int, int], Dict[str, Any]] = {}
+
+    for candidate in ranked_candidates:
+        block_id = str(candidate.get("block_id") or "")
+        center_idx = index_by_block_id.get(block_id)
+        if center_idx is None:
+            continue
+
+        scores = candidate.get("scores") or {}
+        score_payload = {
+            "semantic": _safe_float(scores.get("semantic"), 0.0),
+            "lexical": _safe_float(scores.get("lexical"), 0.0),
+            "structure": _safe_float(scores.get("structure"), 0.0),
+            "final": _safe_float(scores.get("final"), 0.0),
+        }
+        previous_scores = score_by_block_id.get(block_id)
+        if previous_scores is None or score_payload["final"] > previous_scores.get("final", 0.0):
+            score_by_block_id[block_id] = score_payload
+
+        start_idx = max(0, center_idx - radius)
+        end_idx = min(len(blocks) - 1, center_idx + radius)
+        span_key = (start_idx, end_idx)
+        state = span_state.get(span_key)
+        if state is None:
+            state = {
+                "source_block_ids": [],
+                "max_seed_score": 0.0,
+                "max_seed_scores": {"semantic": 0.0, "lexical": 0.0, "structure": 0.0, "final": 0.0},
+            }
+            span_state[span_key] = state
+
+        if block_id and block_id not in state["source_block_ids"]:
+            state["source_block_ids"].append(block_id)
+
+        if score_payload["final"] >= state["max_seed_score"]:
+            state["max_seed_score"] = score_payload["final"]
+            state["max_seed_scores"] = score_payload
+
+    if not span_state:
+        return []
+
+    segments: List[Dict[str, Any]] = []
+    for (start_idx, end_idx), state in span_state.items():
+        segment_blocks = blocks[start_idx : end_idx + 1]
+        segment_block_ids: List[str] = []
+        segment_citations: List[Dict[str, Any]] = []
+        observed_semantic: List[float] = []
+        observed_lexical: List[float] = []
+        observed_structure: List[float] = []
+        observed_final: List[float] = []
+
+        for local_idx, block in enumerate(segment_blocks, start=start_idx):
+            block_id = str(block.get("block_id") or block.get("id") or f"idx_{local_idx}")
+            segment_block_ids.append(block_id)
+            for citation in block.get("citations") or []:
+                if isinstance(citation, dict):
+                    segment_citations.append(dict(citation))
+
+            scores = score_by_block_id.get(block_id)
+            if scores:
+                observed_semantic.append(scores["semantic"])
+                observed_lexical.append(scores["lexical"])
+                observed_structure.append(scores["structure"])
+                observed_final.append(scores["final"])
+
+        merged_text = _merge_segment_text(segment_blocks, max_chars=char_limit)
+        if not merged_text:
+            continue
+
+        seed_scores = state["max_seed_scores"]
+        observed_mean = sum(observed_final) / len(observed_final) if observed_final else seed_scores["final"]
+        coverage = len(observed_final) / max(1, len(segment_blocks))
+        final_score = 0.7 * state["max_seed_score"] + 0.2 * observed_mean + 0.1 * coverage
+        segment_score_payload = {
+            "semantic": round(
+                (sum(observed_semantic) / len(observed_semantic)) if observed_semantic else seed_scores["semantic"],
+                4,
+            ),
+            "lexical": round(
+                (sum(observed_lexical) / len(observed_lexical)) if observed_lexical else seed_scores["lexical"],
+                4,
+            ),
+            "structure": round(
+                (sum(observed_structure) / len(observed_structure)) if observed_structure else seed_scores["structure"],
+                4,
+            ),
+            "coverage": round(coverage, 4),
+            "final": round(final_score, 4),
+        }
+
+        segments.append(
+            {
+                "block_id": f"segment_{start_idx}_{end_idx}",
+                "block_type": "segment",
+                "text": merged_text,
+                "citations": _dedupe_citations(segment_citations, max_items=citations_limit),
+                "scores": segment_score_payload,
+                "segment_block_ids": segment_block_ids,
+                "segment_start_index": start_idx,
+                "segment_end_index": end_idx,
+                "source_block_ids": state["source_block_ids"],
+            }
+        )
+
+    segments.sort(key=lambda c: _safe_float((c.get("scores") or {}).get("final"), 0.0), reverse=True)
+    return segments[: max(1, int(max_segments))]
 
 
 class GeminiLegalClient:

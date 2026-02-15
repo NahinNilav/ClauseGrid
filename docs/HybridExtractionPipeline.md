@@ -316,7 +316,30 @@ def retrieve_legal_candidates(
     return sorted(candidates, key=lambda c: c["scores"]["final"], reverse=True)[:top_k]
 ```
 
-### 4.2 Score Weights
+### 4.2 Relevant Segment Extraction (RSE)
+
+After block scoring, hybrid mode now assembles larger context segments before LLM extraction:
+
+1. Retrieve a larger block pool (`80/60/40` for `high/balanced/fast`)
+2. Build contiguous windows in document order (`prev2 + self + next2`)
+3. Deduplicate windows by span and rerank segment candidates
+4. Send top segments to extractor (`10/8/6`)
+
+```python
+# legal_hybrid.py
+def assemble_relevant_segments(
+    blocks,
+    ranked_candidates,
+    window_radius=2,
+    max_segments=8,
+):
+    # For each retrieved block, create a contiguous span in doc order
+    # and merge neighboring block text + citations into a segment candidate.
+    # Segments are scored by seed relevance + observed span relevance.
+    return top_ranked_segments
+```
+
+### 4.3 Score Weights
 
 | Signal | Weight | Purpose |
 |--------|--------|---------|
@@ -324,7 +347,7 @@ def retrieve_legal_candidates(
 | Lexical | 0.3 | Ensures keyword presence |
 | Structure | 0.2 | Prioritizes tabular data |
 
-### 4.3 Fallback Hash Embedding
+### 4.4 Fallback Hash Embedding
 
 When OpenAI embeddings are unavailable, a hash-based fallback is used:
 
@@ -469,12 +492,15 @@ def confidence_from_signals(
 
 ### 6.4 Retry on Verification Failure
 
-If verifier returns FAIL, retrieval expands to top-12 candidates and retries:
+If verifier returns FAIL, retrieval pool expands, RSE reassembles context, and extraction retries with top-12 segments:
 
 ```python
 if verifier.get("verifier_status") == "FAIL":
-    expanded_candidates = retrieve_legal_candidates(
-        blocks=blocks, field=field, ..., top_k=12  # Expanded from 6
+    expanded_pool = retrieve_legal_candidates(
+        blocks=blocks, field=field, ..., top_k=120  # high profile example
+    )
+    expanded_candidates = assemble_relevant_segments(
+        blocks=blocks, ranked_candidates=expanded_pool, max_segments=12
     )
     primary = self.llm_client.extract(field, expanded_candidates, quality_profile)
     verifier = self.llm_client.verify(field, primary["value"], ...)
@@ -804,9 +830,9 @@ When user clicks the cell, the viewer:
 │  │ 1. Load artifact.blocks for document                            │   │
 │  │ 2. Get/create block embeddings (cached)                         │   │
 │  │ 3. Get field query embedding (precomputed)                      │   │
-│  │ 4. Retrieve top-K candidates (hybrid scoring)                   │   │
-│  │ 5. LLM extract value from candidates                            │   │
-│  │ 6. LLM verify extraction against candidates                     │   │
+│  │ 4. Retrieve block pool + assemble top segment candidates (RSE)  │   │
+│  │ 5. LLM extract value from segments                              │   │
+│  │ 6. LLM verify extraction against segments                       │   │
 │  │ 7. Compute final confidence score                               │   │
 │  │ 8. Store field_extraction record with citations                 │   │
 │  └─────────────────────────────────────────────────────────────────┘   │

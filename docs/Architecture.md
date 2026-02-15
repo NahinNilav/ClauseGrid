@@ -143,7 +143,9 @@ For each field:
 3. Final score formula:
    - `final = 0.5*semantic + 0.3*lexical + 0.2*structure_prior`
 4. If embeddings are unavailable, semantic similarity falls back to local 256-dim hash embeddings.
-5. Top-k candidates are selected (`8/6/4` for `high/balanced/fast`).
+5. In hybrid/llm_reasoning retrieval, top block pools are fetched first (`80/60/40` for `high/balanced/fast`).
+6. Relevant Segment Extraction (RSE) assembles contiguous windows around each seed hit (`prev2 + self + next2` by default), deduplicates overlapping windows, and reranks segments.
+7. Segment candidates are sent to LLM (`10/8/6` for `high/balanced/fast`).
 
 ### 8.5 Structured LLM extraction and verification
 1. Provider is selected by `LEGAL_LLM_PROVIDER`:
@@ -155,7 +157,7 @@ For each field:
    - `verifier_status` (`PASS|PARTIAL|FAIL`)
    - `reason`
    - `best_candidate_index`
-4. If verifier returns `FAIL`, retrieval is expanded (`top_k=12`) and extract/verify is retried.
+4. If verifier returns `FAIL`, retrieval pool expands and RSE reruns, then extract/verify is retried with expanded segment set (`12` default).
 5. In `high` quality profile, self-consistency is checked by re-extracting over reversed candidate order.
 
 ### 8.6 Post-processing and cell persistence
@@ -235,7 +237,7 @@ sequenceDiagram
     SVC->>DB: load cached block embeddings
     SVC->>EMB: embed missing blocks + field queries
     SVC->>DB: upsert document_block_embeddings
-    SVC->>SVC: rank top-k candidates per field
+    SVC->>SVC: rank block pool + assemble RSE segments per field
     SVC->>LLM: structured extract JSON
     SVC->>LLM: verify JSON
     SVC->>DB: insert field_extractions

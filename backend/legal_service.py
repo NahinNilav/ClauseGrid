@@ -13,6 +13,7 @@ from legal_hybrid import (
     OpenAIEmbeddingClient,
     OpenAILegalClient,
     _expand_legal_query,
+    assemble_relevant_segments,
     confidence_from_signals,
     retrieve_legal_candidates,
     self_consistency_agreement,
@@ -43,6 +44,31 @@ def _log_structured(level: int, event: str, **fields: Any) -> None:
 
 def _debug_logging_enabled() -> bool:
     return str(os.getenv("LEGAL_DEBUG_LOGGING", "0")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _env_int(name: str, default: int, *, minimum: int | None = None, maximum: int | None = None) -> int:
+    raw = os.getenv(name)
+    try:
+        value = int(raw) if raw is not None else int(default)
+    except (TypeError, ValueError):
+        value = int(default)
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
 
 
 def _new_id(prefix: str) -> str:
@@ -242,6 +268,10 @@ class LegalReviewService:
         self.llm_provider = self._resolve_llm_provider()
         self.llm_client = self._build_llm_client(self.llm_provider)
         self.embedding_client = OpenAIEmbeddingClient()
+        self.rse_enabled = _env_bool("LEGAL_RSE_ENABLED", True)
+        self.rse_window_radius = _env_int("LEGAL_RSE_WINDOW_RADIUS", 2, minimum=0, maximum=8)
+        self.rse_max_segment_chars = _env_int("LEGAL_RSE_MAX_SEGMENT_CHARS", 12000, minimum=200, maximum=50000)
+        self.rse_max_citations = _env_int("LEGAL_RSE_MAX_CITATIONS", 32, minimum=1, maximum=256)
         _log_structured(
             logging.INFO,
             "legal_service_initialized",
@@ -251,6 +281,10 @@ class LegalReviewService:
             embedding_client_type=type(self.embedding_client).__name__,
             embedding_enabled=bool(getattr(self.embedding_client, "enabled", False)),
             embedding_model=str(getattr(self.embedding_client, "model", "")),
+            rse_enabled=self.rse_enabled,
+            rse_window_radius=self.rse_window_radius,
+            rse_max_segment_chars=self.rse_max_segment_chars,
+            rse_max_citations=self.rse_max_citations,
             debug_logging=_debug_logging_enabled(),
         )
 
@@ -266,6 +300,32 @@ class LegalReviewService:
         if provider == "gemini":
             return GeminiLegalClient()
         return OpenAILegalClient()
+
+    @staticmethod
+    def _quality_profile_key(value: str) -> str:
+        profile = str(value or "fast").lower()
+        if profile not in QUALITY_PROFILE:
+            return "fast"
+        return profile
+
+    def _rse_target_segment_count(self, quality_profile: str, *, expanded: bool = False) -> int:
+        profile = self._quality_profile_key(quality_profile)
+        defaults = {"high": 10, "balanced": 8, "fast": 6}
+        if expanded:
+            default_value = max(12, defaults[profile])
+            return _env_int("LEGAL_RSE_TOP_SEGMENTS_EXPANDED", default_value, minimum=4, maximum=24)
+        env_key = f"LEGAL_RSE_TOP_SEGMENTS_{profile.upper()}"
+        return _env_int(env_key, defaults[profile], minimum=2, maximum=20)
+
+    def _rse_pool_size(self, quality_profile: str, *, expanded: bool = False) -> int:
+        profile = self._quality_profile_key(quality_profile)
+        defaults = {"high": 80, "balanced": 60, "fast": 40}
+        if expanded:
+            default_value = {"high": 120, "balanced": 90, "fast": 60}[profile]
+            env_key = f"LEGAL_RSE_POOL_K_{profile.upper()}_EXPANDED"
+            return _env_int(env_key, default_value, minimum=16, maximum=400)
+        env_key = f"LEGAL_RSE_POOL_K_{profile.upper()}"
+        return _env_int(env_key, defaults[profile], minimum=8, maximum=300)
 
     # Project
     def create_project(self, *, name: str, description: str | None = None) -> Dict[str, Any]:
@@ -1414,15 +1474,18 @@ class LegalReviewService:
     def _compact_retrieval_context(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         compact: List[Dict[str, Any]] = []
         for candidate in candidates:
-            compact.append(
-                {
-                    "block_id": candidate.get("block_id"),
-                    "block_type": candidate.get("block_type"),
-                    "scores": candidate.get("scores") or {},
-                    "text_preview": str(candidate.get("text") or "")[:500],
-                    "citations": (candidate.get("citations") or [])[:2],
-                }
-            )
+            item = {
+                "block_id": candidate.get("block_id"),
+                "block_type": candidate.get("block_type"),
+                "scores": candidate.get("scores") or {},
+                "text_preview": str(candidate.get("text") or "")[:500],
+                "citations": (candidate.get("citations") or [])[:2],
+            }
+            if candidate.get("segment_block_ids"):
+                item["segment_block_ids"] = candidate.get("segment_block_ids")
+            if candidate.get("source_block_ids"):
+                item["source_block_ids"] = candidate.get("source_block_ids")
+            compact.append(item)
         return compact
 
     def _build_retrieval_blocks(
@@ -1603,18 +1666,34 @@ class LegalReviewService:
         quality_profile: str,
         query_embedding: List[float] | None = None,
     ) -> Optional[Dict[str, Any]]:
-        top_k = 8 if quality_profile == "high" else (6 if quality_profile == "balanced" else 4)
+        profile = self._quality_profile_key(quality_profile)
+        block_top_k = 8 if profile == "high" else (6 if profile == "balanced" else 4)
+        segment_top_k = self._rse_target_segment_count(profile)
+        candidate_top_k = segment_top_k if self.rse_enabled else block_top_k
         field_key = str(field.get("key") or field.get("id") or field.get("name") or "")
         blocks = self._build_retrieval_blocks(artifact, doc_version_id)
         block_embeddings = self._get_or_create_block_embeddings(doc_version_id, blocks)
-        candidates = retrieve_legal_candidates(
+        initial_pool_k = self._rse_pool_size(profile) if self.rse_enabled else candidate_top_k
+        ranked_candidates = retrieve_legal_candidates(
             blocks=blocks,
             field=field,
             doc_version_id=doc_version_id,
             block_embeddings=block_embeddings,
             query_embedding=query_embedding,
-            top_k=top_k,
+            top_k=initial_pool_k,
         )
+        candidates = ranked_candidates[:candidate_top_k]
+        if self.rse_enabled:
+            assembled = assemble_relevant_segments(
+                blocks=blocks,
+                ranked_candidates=ranked_candidates,
+                window_radius=self.rse_window_radius,
+                max_segments=segment_top_k,
+                max_chars=self.rse_max_segment_chars,
+                max_citations=self.rse_max_citations,
+            )
+            if assembled:
+                candidates = assembled
         retrieval_context = self._compact_retrieval_context(candidates)
         if _debug_logging_enabled():
             top_score = float((candidates[0].get("scores") or {}).get("final") or 0.0) if candidates else 0.0
@@ -1626,6 +1705,8 @@ class LegalReviewService:
                 quality_profile=quality_profile,
                 block_count=len(blocks),
                 block_embedding_count=sum(1 for value in block_embeddings if value),
+                initial_pool_k=initial_pool_k,
+                rse_enabled=self.rse_enabled,
                 candidate_count=len(candidates),
                 top_score=round(top_score, 4),
             )
@@ -1675,14 +1756,28 @@ class LegalReviewService:
             )
 
             if verifier.get("verifier_status") == "FAIL":
-                expanded_candidates = retrieve_legal_candidates(
+                expanded_pool_k = self._rse_pool_size(profile, expanded=True) if self.rse_enabled else 12
+                expanded_ranked_candidates = retrieve_legal_candidates(
                     blocks=blocks,
                     field=field,
                     doc_version_id=doc_version_id,
                     block_embeddings=block_embeddings,
                     query_embedding=query_embedding,
-                    top_k=12,
+                    top_k=expanded_pool_k,
                 )
+                expanded_top_k = self._rse_target_segment_count(profile, expanded=True) if self.rse_enabled else 12
+                expanded_candidates = expanded_ranked_candidates[:expanded_top_k]
+                if self.rse_enabled:
+                    assembled_expanded = assemble_relevant_segments(
+                        blocks=blocks,
+                        ranked_candidates=expanded_ranked_candidates,
+                        window_radius=self.rse_window_radius,
+                        max_segments=expanded_top_k,
+                        max_chars=self.rse_max_segment_chars,
+                        max_citations=self.rse_max_citations,
+                    )
+                    if assembled_expanded:
+                        expanded_candidates = assembled_expanded
                 if expanded_candidates:
                     candidates = expanded_candidates
                     retrieval_context = self._compact_retrieval_context(candidates)
