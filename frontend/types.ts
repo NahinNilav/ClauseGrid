@@ -172,6 +172,7 @@ export interface Column {
 }
 
 export interface ExtractionCell {
+  field_key?: string;
   value: string;
   confidence: 'High' | 'Medium' | 'Low';
   quote: string;

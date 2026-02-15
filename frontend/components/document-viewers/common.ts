@@ -80,6 +80,25 @@ const overlapScore = (left: string, right: string): number => {
   return overlap / Math.max(leftTokens.size, rightTokens.size);
 };
 
+const headerBiasedFieldKeys = new Set(['document_title', 'parties_entities', 'effective_date_term']);
+
+const earlyPageBoost = (fieldKey: string | undefined, page: number | undefined): number => {
+  const normalizedField = normalizeForMatch(fieldKey || '');
+  if (!normalizedField || !headerBiasedFieldKeys.has(normalizedField)) return 0;
+  if (typeof page !== 'number' || !Number.isFinite(page)) return 0;
+  if (page <= 3) return 0.35;
+  if (page <= 10) return 0.2;
+  return 0;
+};
+
+const isBoilerplateSnippet = (snippet: string): boolean => {
+  const normalized = normalizeForMatch(snippet);
+  return (
+    normalized.includes('confidential treatment requested by tesla') ||
+    normalized.includes('information has been omitted and filed separately')
+  );
+};
+
 const scoreCitationAgainstCell = (
   citation: SourceCitation,
   cell?: ExtractionCell | null
@@ -119,6 +138,18 @@ const scoreCitationAgainstCell = (
         score += 1.5;
       }
     });
+
+    if (isBoilerplateSnippet(snippet)) {
+      const maxCoreOverlap = Math.max(
+        overlapScore(snippet, quoteProbe),
+        overlapScore(snippet, valueProbe)
+      );
+      if (maxCoreOverlap < 0.18) {
+        score -= 0.9;
+      } else {
+        score -= 0.25;
+      }
+    }
   }
 
   if (citation.bbox?.length === 4) score += 0.25;
@@ -154,17 +185,39 @@ export const pickPrimaryCitation = (
     return pool[0] || null;
   }
 
-  let best = pool[0] || null;
-  let bestScore = -1;
-  pool.forEach((citation) => {
-    const score = scoreCitationAgainstCell(citation, cell);
-    if (score > bestScore) {
-      bestScore = score;
-      best = citation;
+  const scored = pool.map((citation) => ({
+    citation,
+    baseScore: scoreCitationAgainstCell(citation, cell),
+  }));
+  if (!scored.length) {
+    return pool[0] || null;
+  }
+
+  let best = scored[0];
+  scored.forEach((entry) => {
+    if (entry.baseScore > best.baseScore) {
+      best = entry;
     }
   });
 
-  return best || pool[0] || null;
+  if (cell?.field_key) {
+    const ranked = [...scored].sort((a, b) => b.baseScore - a.baseScore);
+    const gap = ranked.length > 1 ? ranked[0].baseScore - ranked[1].baseScore : Number.POSITIVE_INFINITY;
+    if (gap < 0.4) {
+      let boostedBest = scored[0];
+      let boostedBestScore = scored[0].baseScore + earlyPageBoost(cell.field_key, scored[0].citation.page);
+      scored.forEach((entry) => {
+        const boostedScore = entry.baseScore + earlyPageBoost(cell.field_key, entry.citation.page);
+        if (boostedScore > boostedBestScore) {
+          boostedBest = entry;
+          boostedBestScore = boostedScore;
+        }
+      });
+      return boostedBest.citation || pool[0] || null;
+    }
+  }
+
+  return best.citation || pool[0] || null;
 };
 
 const scoreBlockAgainstCell = (block: ArtifactBlock, probes: string[], pageHint?: number): number => {

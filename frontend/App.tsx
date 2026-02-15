@@ -61,6 +61,10 @@ interface TableCell {
   } | null;
   effective_value: string;
   is_diff: boolean;
+  baseline_value?: string;
+  current_value?: string;
+  compare_mode?: string;
+  annotation_count?: number;
 }
 
 interface TableRow {
@@ -107,6 +111,7 @@ const toLegacyCell = (cell: TableCell | null): ExtractionCell | null => {
   const ai = cell.ai_result;
   const citations = toCitationArray(ai.citations_json);
   return {
+    field_key: cell.field_key,
     value: cell.effective_value || ai.value || '',
     confidence: confidenceLabel(ai.confidence_score || 0),
     quote: ai.raw_text || ai.value || '',
@@ -134,31 +139,31 @@ const toViewerDocument = (row: TableRow): DocumentFile => {
 
 const defaultFields: TemplateFieldDefinition[] = [
   {
+    key: 'document_title',
+    name: 'Document Title',
+    type: 'text',
+    prompt: 'Extract the document title as written in the source document.',
+    required: true,
+  },
+  {
     key: 'parties_entities',
     name: 'Parties and Entities',
     type: 'text',
-    prompt: 'Extract the parties/entities to this legal agreement.',
+    prompt: 'Extract the parties and entities in the agreement/document.',
     required: true,
   },
   {
-    key: 'effective_date',
-    name: 'Effective Date',
-    type: 'date',
-    prompt: 'Extract the effective date of the agreement.',
-    required: true,
-  },
-  {
-    key: 'dispute_resolution',
-    name: 'Dispute Resolution',
+    key: 'effective_date_term',
+    name: 'Effective Date / Term',
     type: 'text',
-    prompt: 'Extract dispute resolution clause and governing approach.',
+    prompt: 'Extract the effective date and the contract term/duration.',
     required: false,
   },
   {
-    key: 'payment_terms',
-    name: 'Payment Terms',
-    type: 'text',
-    prompt: 'Extract payment terms or timing obligations.',
+    key: 'contains_redactions',
+    name: 'Contains Redactions',
+    type: 'boolean',
+    prompt: 'Return true if the document contains redactions, otherwise false.',
     required: false,
   },
 ];
@@ -194,6 +199,13 @@ const App: React.FC = () => {
   const [newProjectName, setNewProjectName] = useState<string>('Legal Tabular Review Project');
   const [newProjectDescription, setNewProjectDescription] = useState<string>('Take-home demo project for legal contract comparison.');
   const [showCreateProjectForm, setShowCreateProjectForm] = useState<boolean>(false);
+  const [showEditProjectForm, setShowEditProjectForm] = useState<boolean>(false);
+  const [editProjectName, setEditProjectName] = useState<string>('');
+  const [editProjectDescription, setEditProjectDescription] = useState<string>('');
+  const [editProjectStatus, setEditProjectStatus] = useState<'DRAFT' | 'ACTIVE' | 'ARCHIVED'>('DRAFT');
+  const [exportValueMode, setExportValueMode] = useState<'effective' | 'ai'>('effective');
+  const [editingAnnotationId, setEditingAnnotationId] = useState<string | null>(null);
+  const [annotationEditBody, setAnnotationEditBody] = useState<string>('');
 
   const [templateName, setTemplateName] = useState<string>('Default Legal Template');
   const [draftFields, setDraftFields] = useState<TemplateFieldDefinition[]>(defaultFields);
@@ -265,6 +277,15 @@ const App: React.FC = () => {
     return { row, cell };
   }, [tableView, selectedRowVersionId, selectedFieldKey]);
 
+  const selectedCellAnnotations = useMemo(() => {
+    if (!selectedCell) return [];
+    return annotations.filter(
+      (annotation) =>
+        annotation.document_version_id === selectedCell.row.document_version_id &&
+        annotation.field_key === selectedCell.cell.field_key
+    );
+  }, [annotations, selectedCell?.row.document_version_id, selectedCell?.cell.field_key]);
+
   const rowHasUnresolved = (row: TableRow): boolean =>
     (tableView?.columns || []).some((col) => {
       const cell = row.cells[col.key];
@@ -307,6 +328,28 @@ const App: React.FC = () => {
     setPendingTaskIds((prev) => prev.filter((id) => id !== taskId));
   };
 
+  const hydrateDraftFromTemplate = useCallback(
+    (templateList: any[], templateId: string | null, templateVersionId: string | null) => {
+      if (!templateId || !templateVersionId) return;
+      const selectedTemplate = (templateList || []).find((tpl: any) => tpl.id === templateId);
+      if (!selectedTemplate) return;
+      const selectedVersion = (selectedTemplate.versions || []).find((version: any) => version.id === templateVersionId);
+      if (!selectedVersion || !Array.isArray(selectedVersion.fields_json)) return;
+      const nextFields: TemplateFieldDefinition[] = selectedVersion.fields_json.map((field: any) => ({
+        key: String(field.key || field.id || ''),
+        name: String(field.name || field.key || ''),
+        type: String(field.type || 'text'),
+        prompt: String(field.prompt || ''),
+        required: Boolean(field.required),
+      }));
+      if (nextFields.length) {
+        setDraftFields(nextFields);
+      }
+      setTemplateName(String(selectedTemplate.name || 'Template'));
+    },
+    []
+  );
+
   const refreshProjects = async () => {
     try {
       const data = await api.listProjects();
@@ -337,6 +380,11 @@ const App: React.FC = () => {
 
       setSelectedTemplateId(nextTemplateId);
       setSelectedTemplateVersionId(nextTemplateVersionId);
+      const templateSelectionChanged =
+        nextTemplateId !== selectedTemplateId || nextTemplateVersionId !== selectedTemplateVersionId;
+      if (templateSelectionChanged) {
+        hydrateDraftFromTemplate(data.templates || [], nextTemplateId, nextTemplateVersionId);
+      }
 
       if (loadTable && nextTemplateVersionId) {
         const table = await api.getTableView(projectId, nextTemplateVersionId, baselineDocumentId || undefined);
@@ -345,6 +393,19 @@ const App: React.FC = () => {
 
       const annotationData = await api.listAnnotations(projectId, nextTemplateVersionId || undefined);
       setAnnotations(annotationData.annotations || []);
+
+      const taskData = await api.listProjectTasks(projectId, 'QUEUED,RUNNING');
+      const activeTasks = taskData.tasks || [];
+      if (activeTasks.length) {
+        setTasks((prev) => {
+          const next = { ...prev };
+          activeTasks.forEach((task) => {
+            next[task.id] = task;
+          });
+          return next;
+        });
+        setPendingTaskIds((prev) => Array.from(new Set([...prev, ...activeTasks.map((task) => task.id)])));
+      }
     } catch (err: any) {
       setError(err.message || 'Failed to refresh project context');
     }
@@ -360,6 +421,14 @@ const App: React.FC = () => {
     sourceLoadInFlightRef.current.clear();
     void refreshProjectContext(selectedProjectId, tab === 'table');
   }, [selectedProjectId]);
+
+  useEffect(() => {
+    if (!selectedProject) return;
+    setEditProjectName(selectedProject.name || '');
+    setEditProjectDescription(selectedProject.description || '');
+    setEditProjectStatus((selectedProject.status as 'DRAFT' | 'ACTIVE' | 'ARCHIVED') || 'DRAFT');
+    setShowEditProjectForm(false);
+  }, [selectedProject?.id, selectedProject?.name, selectedProject?.description, selectedProject?.status]);
 
   const selectedDocVersionId = selectedCell?.row.document_version_id || '';
   const selectedDocFormat = String(selectedCell?.row.artifact?.format || '');
@@ -457,6 +526,27 @@ const App: React.FC = () => {
     }
   };
 
+  const updateProjectDetails = async () => {
+    if (!selectedProjectId) return;
+    if (!editProjectName.trim()) return;
+    setBusy(true);
+    setError('');
+    try {
+      await api.updateProject(selectedProjectId, {
+        name: editProjectName.trim(),
+        description: editProjectDescription,
+        status: editProjectStatus,
+      });
+      setShowEditProjectForm(false);
+      await refreshProjects();
+      await refreshProjectContext(selectedProjectId, tab === 'table');
+    } catch (err: any) {
+      setError(err.message || 'Failed to update project');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const deleteProjectById = async (projectId: string) => {
     const project = projects.find((item) => item.id === projectId);
     const projectName = project?.name || 'this project';
@@ -468,14 +558,14 @@ const App: React.FC = () => {
     try {
       await api.deleteProject(projectId);
 
-      const removedTaskIds = Object.entries(tasks)
+      const removedTaskIds = (Object.entries(tasks) as Array<[string, RequestTask]>)
         .filter(([, task]) => task.project_id === projectId)
         .map(([taskId]) => taskId);
       if (removedTaskIds.length) {
         setPendingTaskIds((prev) => prev.filter((taskId) => !removedTaskIds.includes(taskId)));
         setTasks((prev) => {
           const next: Record<string, RequestTask> = {};
-          Object.entries(prev).forEach(([taskId, task]) => {
+          (Object.entries(prev) as Array<[string, RequestTask]>).forEach(([taskId, task]) => {
             if (!removedTaskIds.includes(taskId)) {
               next[taskId] = task;
             }
@@ -560,6 +650,7 @@ const App: React.FC = () => {
         },
       };
       const data = await api.createTemplate(selectedProjectId, payload);
+      addPendingTaskIds([data.triggered_extraction_task_id]);
       await refreshProjectContext(selectedProjectId, true);
       setSelectedTemplateId(data.template.id);
       setSelectedTemplateVersionId(data.template_version.id);
@@ -585,6 +676,7 @@ const App: React.FC = () => {
           boolean_policy: 'strict_true_false',
         },
       });
+      addPendingTaskIds([data.triggered_extraction_task_id]);
       setSelectedTemplateVersionId(data.template_version.id);
       await refreshProjectContext(selectedProjectId, true);
       setTab('table');
@@ -631,11 +723,37 @@ const App: React.FC = () => {
     }
   };
 
+  const exportTableCsv = async () => {
+    if (!selectedProjectId || !selectedTemplateVersionId) return;
+    setBusy(true);
+    setError('');
+    try {
+      const { blob, filename } = await api.downloadTableExportCsv(
+        selectedProjectId,
+        selectedTemplateVersionId,
+        baselineDocumentId || undefined,
+        exportValueMode
+      );
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      setError(err.message || 'Failed to export CSV');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   useEffect(() => {
     if (tab === 'table' && selectedProjectId && selectedTemplateVersionId) {
       void refreshTable();
     }
-  }, [tab, selectedProjectId, selectedTemplateVersionId]);
+  }, [tab, selectedProjectId, selectedTemplateVersionId, baselineDocumentId]);
 
   useEffect(() => {
     if (!selectedCell) return;
@@ -643,6 +761,8 @@ const App: React.FC = () => {
     setManualValue(selectedCell.cell.review_overlay?.manual_value || selectedCell.cell.effective_value || '');
     setReviewer(selectedCell.cell.review_overlay?.reviewer || 'analyst@demo.local');
     setReviewNotes(selectedCell.cell.review_overlay?.notes || '');
+    setEditingAnnotationId(null);
+    setAnnotationEditBody('');
   }, [selectedCell?.row.document_version_id, selectedCell?.cell.field_key]);
 
   const saveReview = async () => {
@@ -679,12 +799,53 @@ const App: React.FC = () => {
         body: annotationBody,
         author: reviewer,
         approved: false,
+        resolved: false,
       });
       setAnnotationBody('');
       const data = await api.listAnnotations(selectedProjectId, selectedTemplateVersionId);
       setAnnotations(data.annotations || []);
+      await refreshTable();
     } catch (err: any) {
       setError(err.message || 'Failed to add annotation');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const updateAnnotationItem = async (
+    annotationId: string,
+    updates: { body?: string; approved?: boolean; resolved?: boolean; author?: string }
+  ) => {
+    if (!selectedProjectId) return;
+    setBusy(true);
+    setError('');
+    try {
+      await api.updateAnnotation(selectedProjectId, annotationId, updates);
+      const data = await api.listAnnotations(selectedProjectId, selectedTemplateVersionId || undefined);
+      setAnnotations(data.annotations || []);
+      await refreshTable();
+    } catch (err: any) {
+      setError(err.message || 'Failed to update annotation');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteAnnotationItem = async (annotationId: string) => {
+    if (!selectedProjectId) return;
+    setBusy(true);
+    setError('');
+    try {
+      await api.deleteAnnotation(selectedProjectId, annotationId);
+      const data = await api.listAnnotations(selectedProjectId, selectedTemplateVersionId || undefined);
+      setAnnotations(data.annotations || []);
+      if (editingAnnotationId === annotationId) {
+        setEditingAnnotationId(null);
+        setAnnotationEditBody('');
+      }
+      await refreshTable();
+    } catch (err: any) {
+      setError(err.message || 'Failed to delete annotation');
     } finally {
       setBusy(false);
     }
@@ -1003,6 +1164,14 @@ const App: React.FC = () => {
             <div className="text-xs text-[#8A8470]">{selectedProject?.description || 'Create or select a project to begin.'}</div>
           </div>
           <div className="flex items-center gap-2">
+            {selectedProjectId && (
+              <button
+                onClick={() => setShowEditProjectForm((prev) => !prev)}
+                className="px-3 py-1.5 rounded-pill text-xs font-semibold bg-[#EFF1F5] text-[#4A5A7B] hover:bg-[#DFE4EE]"
+              >
+                {showEditProjectForm ? 'Close Edit' : 'Edit Project'}
+              </button>
+            )}
             {(['documents', 'templates', 'table', 'evaluation', 'annotations'] as WorkspaceTab[]).map((item) => (
               <button
                 key={item}
@@ -1016,6 +1185,49 @@ const App: React.FC = () => {
             ))}
           </div>
         </header>
+
+        {showEditProjectForm && selectedProjectId && (
+          <div className="mx-5 mt-3 bg-white border border-[#E5E7EB] rounded-xl px-4 py-3">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
+              <input
+                value={editProjectName}
+                onChange={(e) => setEditProjectName(e.target.value)}
+                className="md:col-span-1 border border-[#E5E7EB] rounded-lg px-3 py-2 text-sm"
+                placeholder="Project name"
+              />
+              <input
+                value={editProjectDescription}
+                onChange={(e) => setEditProjectDescription(e.target.value)}
+                className="md:col-span-2 border border-[#E5E7EB] rounded-lg px-3 py-2 text-sm"
+                placeholder="Project description"
+              />
+              <select
+                value={editProjectStatus}
+                onChange={(e) => setEditProjectStatus(e.target.value as 'DRAFT' | 'ACTIVE' | 'ARCHIVED')}
+                className="md:col-span-1 border border-[#E5E7EB] rounded-lg px-3 py-2 text-sm"
+              >
+                <option value="DRAFT">DRAFT</option>
+                <option value="ACTIVE">ACTIVE</option>
+                <option value="ARCHIVED">ARCHIVED</option>
+              </select>
+            </div>
+            <div className="flex gap-2 mt-3">
+              <button
+                onClick={updateProjectDetails}
+                disabled={busy || !editProjectName.trim()}
+                className="px-3 py-1.5 rounded-pill bg-[#1C1C1C] text-white text-xs font-semibold disabled:opacity-50"
+              >
+                Save Project
+              </button>
+              <button
+                onClick={() => setShowEditProjectForm(false)}
+                className="px-3 py-1.5 rounded-pill bg-[#F5F4F0] text-[#6B6555] text-xs font-semibold"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
 
         {error && (
           <div className="mx-5 mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
@@ -1092,7 +1304,7 @@ const App: React.FC = () => {
 
                     <div className="space-y-3">
                       {draftFields.map((field, idx) => (
-                        <div key={`${field.key}_${idx}`} className="grid grid-cols-12 gap-2 items-center">
+                        <div key={`draft_field_${idx}`} className="grid grid-cols-12 gap-2 items-center">
                           <input
                             value={field.key}
                             onChange={(e) => updateDraftField(idx, { key: e.target.value })}
@@ -1157,8 +1369,10 @@ const App: React.FC = () => {
                             </div>
                             <button
                               onClick={() => {
+                                const nextVersionId = tpl.active_version_id || tpl.versions?.[0]?.id || null;
                                 setSelectedTemplateId(tpl.id);
-                                setSelectedTemplateVersionId(tpl.active_version_id || tpl.versions?.[0]?.id || null);
+                                setSelectedTemplateVersionId(nextVersionId);
+                                hydrateDraftFromTemplate(templates, tpl.id, nextVersionId);
                               }}
                               className="px-3 py-1 rounded-pill bg-[#EFF1F5] text-xs font-semibold"
                             >
@@ -1189,6 +1403,21 @@ const App: React.FC = () => {
                           </button>
                           <button onClick={refreshTable} className="px-4 py-2 rounded-lg bg-white border border-[#E5E7EB] text-xs font-semibold text-[#1C1C1C] hover:bg-[#F5F4F0] transition-colors">
                             Refresh Table
+                          </button>
+                          <select
+                            value={exportValueMode}
+                            onChange={(e) => setExportValueMode(e.target.value as 'effective' | 'ai')}
+                            className="border border-[#E5E7EB] rounded-lg px-2 py-2 text-xs bg-white"
+                            title="CSV value mode"
+                          >
+                            <option value="effective">Export Effective</option>
+                            <option value="ai">Export AI</option>
+                          </select>
+                          <button
+                            onClick={exportTableCsv}
+                            className="px-4 py-2 rounded-lg bg-white border border-[#E5E7EB] text-xs font-semibold text-[#1C1C1C] hover:bg-[#F5F4F0] transition-colors"
+                          >
+                            Export CSV
                           </button>
                         </div>
 
@@ -1351,6 +1580,11 @@ const App: React.FC = () => {
                                       {cell?.is_diff && (
                                         <span className="px-1.5 py-0.5 rounded bg-[#FFF4D6] text-[#7A5A00]">DIFF</span>
                                       )}
+                                      {(cell?.annotation_count || 0) > 0 && (
+                                        <span className="px-1.5 py-0.5 rounded bg-[#E8EEF8] text-[#304A7A]">
+                                          ANN {cell?.annotation_count}
+                                        </span>
+                                      )}
                                     </div>
                                   </td>
                                 );
@@ -1421,6 +1655,11 @@ const App: React.FC = () => {
                                 {selectedCell.cell.ai_result.uncertainty_reason}
                               </div>
                             )}
+                            <div className="mt-2 text-[11px] text-[#6B6555] bg-white rounded-lg border border-[#E5E7EB] p-2">
+                              <div><strong>Compare Mode:</strong> {selectedCell.cell.compare_mode || 'value'}</div>
+                              <div><strong>Baseline Value:</strong> {selectedCell.cell.baseline_value || '-'}</div>
+                              <div><strong>Current Value:</strong> {selectedCell.cell.current_value || selectedCell.cell.effective_value || '-'}</div>
+                            </div>
                           </div>
 
                           <div className="space-y-2.5">
@@ -1481,6 +1720,95 @@ const App: React.FC = () => {
                             <button onClick={addAnnotation} className="mt-1.5 w-full px-4 py-2 rounded-lg bg-[#4A5A7B] text-white text-xs font-semibold hover:bg-[#3D4D6A] transition-colors">
                               Add Annotation
                             </button>
+                            <div className="mt-2 border border-[#E5E7EB] rounded-lg p-2 bg-[#FAFAF7] space-y-2">
+                              <div className="text-[10px] font-semibold text-[#8A8470] uppercase tracking-wider">
+                                Cell Thread ({selectedCellAnnotations.length})
+                              </div>
+                              {!selectedCellAnnotations.length && (
+                                <div className="text-xs text-[#8A8470]">No annotations for this cell.</div>
+                              )}
+                              {selectedCellAnnotations.map((annotation) => (
+                                <div key={annotation.id} className="border border-[#E5E7EB] rounded-lg p-2 bg-white">
+                                  <div className="text-[10px] text-[#8A8470] mb-1">
+                                    {annotation.author || '-'} · {annotation.approved ? 'Approved' : 'Unapproved'} · {annotation.resolved ? 'Resolved' : 'Open'}
+                                  </div>
+                                  {editingAnnotationId === annotation.id ? (
+                                    <>
+                                      <textarea
+                                        value={annotationEditBody}
+                                        onChange={(e) => setAnnotationEditBody(e.target.value)}
+                                        className="w-full border border-[#E5E7EB] rounded px-2 py-1 text-xs min-h-[48px]"
+                                      />
+                                      <div className="flex gap-1 mt-1">
+                                        <button
+                                          onClick={() => {
+                                            void updateAnnotationItem(annotation.id, {
+                                              body: annotationEditBody,
+                                              author: reviewer,
+                                            });
+                                            setEditingAnnotationId(null);
+                                            setAnnotationEditBody('');
+                                          }}
+                                          className="px-2 py-1 rounded bg-[#1C1C1C] text-white text-[10px] font-semibold"
+                                        >
+                                          Save
+                                        </button>
+                                        <button
+                                          onClick={() => {
+                                            setEditingAnnotationId(null);
+                                            setAnnotationEditBody('');
+                                          }}
+                                          className="px-2 py-1 rounded bg-[#F5F4F0] text-[#6B6555] text-[10px] font-semibold"
+                                        >
+                                          Cancel
+                                        </button>
+                                      </div>
+                                    </>
+                                  ) : (
+                                    <div className="text-xs text-[#1C1C1C] whitespace-pre-wrap break-words">{annotation.body}</div>
+                                  )}
+                                  <div className="flex flex-wrap gap-1 mt-1.5">
+                                    <button
+                                      onClick={() => {
+                                        setEditingAnnotationId(annotation.id);
+                                        setAnnotationEditBody(annotation.body || '');
+                                      }}
+                                      className="px-2 py-1 rounded bg-[#EFF1F5] text-[#4A5A7B] text-[10px] font-semibold"
+                                    >
+                                      Edit
+                                    </button>
+                                    <button
+                                      onClick={() =>
+                                        void updateAnnotationItem(annotation.id, {
+                                          approved: !annotation.approved,
+                                          author: reviewer,
+                                        })
+                                      }
+                                      className="px-2 py-1 rounded bg-[#EFF1F5] text-[#4A5A7B] text-[10px] font-semibold"
+                                    >
+                                      {annotation.approved ? 'Unapprove' : 'Approve'}
+                                    </button>
+                                    <button
+                                      onClick={() =>
+                                        void updateAnnotationItem(annotation.id, {
+                                          resolved: !annotation.resolved,
+                                          author: reviewer,
+                                        })
+                                      }
+                                      className="px-2 py-1 rounded bg-[#EFF1F5] text-[#4A5A7B] text-[10px] font-semibold"
+                                    >
+                                      {annotation.resolved ? 'Reopen' : 'Resolve'}
+                                    </button>
+                                    <button
+                                      onClick={() => void deleteAnnotationItem(annotation.id)}
+                                      className="px-2 py-1 rounded bg-red-50 text-red-700 text-[10px] font-semibold"
+                                    >
+                                      Delete
+                                    </button>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
                           </div>
                         </div>
                       </div>
@@ -1637,6 +1965,7 @@ const App: React.FC = () => {
                           <th className="text-left px-4 py-3 text-xs uppercase tracking-[0.1em] text-[#8A8470]">Document Version</th>
                           <th className="text-left px-4 py-3 text-xs uppercase tracking-[0.1em] text-[#8A8470]">Author</th>
                           <th className="text-left px-4 py-3 text-xs uppercase tracking-[0.1em] text-[#8A8470]">Approved</th>
+                          <th className="text-left px-4 py-3 text-xs uppercase tracking-[0.1em] text-[#8A8470]">Resolved</th>
                           <th className="text-left px-4 py-3 text-xs uppercase tracking-[0.1em] text-[#8A8470]">Comment</th>
                         </tr>
                       </thead>
@@ -1647,6 +1976,7 @@ const App: React.FC = () => {
                             <td className="px-4 py-3">{annotation.document_version_id}</td>
                             <td className="px-4 py-3">{annotation.author || '-'}</td>
                             <td className="px-4 py-3">{annotation.approved ? 'Yes' : 'No'}</td>
+                            <td className="px-4 py-3">{annotation.resolved ? 'Yes' : 'No'}</td>
                             <td className="px-4 py-3">{annotation.body}</td>
                           </tr>
                         ))}

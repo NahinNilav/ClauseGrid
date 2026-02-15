@@ -14,6 +14,9 @@ Implemented Screens (tabbed workspace)
 
 Implemented Features
 - API-backed workflow (no file-only project lifecycle dependency)
+- Project edit workflow (name/description/status) via `PATCH /api/projects/{id}`
 - Task polling via `/api/tasks/{task_id}`
+- CSV export from table review (`effective` or `ai` value mode)
 - Required review states: `CONFIRMED | REJECTED | MANUAL_UPDATED | MISSING_DATA`
 - Citation viewer integration through existing `DocumentViewer` stack
+- Annotation lifecycle controls (edit/approve/resolve/delete)

@@ -31,6 +31,7 @@
 | `GET /api/projects/{project_id}/extraction-runs/{run_id}` | Sync | `extraction_runs`, `field_extractions` | Run and per-cell results |
 | `GET /api/projects/{project_id}/extraction-runs/{run_id}/diagnostics` | Sync | `extraction_runs`, `field_extractions` | Aggregated diagnostics |
 | `GET /api/projects/{project_id}/table-view` | Sync | reads `document_versions`, `field_extractions`, `review_decisions` | Returns aligned review table |
+| `GET /api/projects/{project_id}/table-export.csv` | Sync | reads table-view projection | Exports comparison table as CSV (`value_mode=effective|ai`) |
 | `POST /api/projects/{project_id}/review-decisions` | Sync | `review_decisions`, `audit_events` | Upsert review state per cell |
 | `GET /api/projects/{project_id}/review-decisions` | Sync | `review_decisions` | List review overlays |
 | `POST /api/projects/{project_id}/ground-truth-sets` | Sync | `ground_truth_sets`, `ground_truth_labels`, `audit_events` | Creates reference labels |
@@ -38,13 +39,15 @@
 | `GET /api/projects/{project_id}/evaluation-runs/{eval_run_id}` | Sync | `evaluation_runs` | Returns metrics and notes |
 | `POST /api/projects/{project_id}/annotations` | Sync | `annotations`, `audit_events` | Adds non-destructive note |
 | `GET /api/projects/{project_id}/annotations` | Sync | `annotations` | Lists annotations |
+| `PATCH /api/projects/{project_id}/annotations/{annotation_id}` | Sync | `annotations`, `audit_events` | Edits annotation body/approval/resolution |
+| `DELETE /api/projects/{project_id}/annotations/{annotation_id}` | Sync | `annotations`, `audit_events` | Deletes annotation |
 | `GET /api/projects/{project_id}/tasks` | Sync | `request_tasks` | Task list/filter for status tracking |
 | `POST /api/tasks/{task_id}/cancel` | Sync | `request_tasks`; may update `extraction_runs`/`evaluation_runs` | Cancel one task; optional purge |
 | `POST /api/projects/{project_id}/tasks/cancel-pending` | Sync | `request_tasks` (+ optional delete) | Bulk cancel active project tasks |
 | `DELETE /api/tasks/{task_id}` | Sync | `request_tasks`, `audit_events` | Delete task (blocked if active unless forced) |
 | `GET /api/tasks/{task_id}` | Sync | `request_tasks` | Polling endpoint |
 | `POST /convert` | Sync | none (stateless parse) | File -> artifact payload |
-| `POST /render-pdf-page` | Sync | none (stateless render) | Renders cited page image + optional bbox |
+| `POST /render-pdf-page` | Sync | none (stateless render) | Renders cited page image + anchored bbox diagnostics |
 | `POST /events` | Sync | server logs only | Client runtime event ingestion |
 
 ## 3. Core Request/Response Contracts
@@ -154,9 +157,17 @@ Response structure:
   - `review_overlay`
   - `effective_value`
   - `is_diff`
+  - `baseline_value`
+  - `current_value`
+  - `compare_mode`
+  - `annotation_count`
  - each row also includes:
    - `document_version_id`
    - `source_available` (whether original source bytes can be fetched for structured viewers)
+
+CSV export:
+- `GET /api/projects/{project_id}/table-export.csv?template_version_id=tpv_x&baseline_document_id=doc_x&value_mode=effective|ai`
+- Includes: document/version identifiers, field key/name, exported value, effective/AI values, review status, confidence, citations JSON, diff metadata, annotation count.
 
 ### 3.6 Review Decision Contract
 `POST /api/projects/{project_id}/review-decisions`
@@ -229,6 +240,44 @@ Evaluation result metrics in `evaluation_run.metrics_json`:
   "approved": false
 }
 ```
+
+`PATCH /api/projects/{project_id}/annotations/{annotation_id}`
+```json
+{
+  "body": "Reviewed and approved",
+  "approved": true,
+  "resolved": true
+}
+```
+
+`DELETE /api/projects/{project_id}/annotations/{annotation_id}`
+- Returns `{ "annotation_id": "...", "deleted": true }` when deleted.
+
+### 3.9 PDF Render Anchor Contract
+`POST /render-pdf-page` (multipart):
+- required:
+  - `file`
+  - `page`
+- optional:
+  - `snippet`
+  - `snippet_candidates_json` (JSON array of probe strings)
+  - `citation_start_char`
+  - `citation_end_char`
+  - `citation_bbox_json` (JSON bbox array)
+
+Response includes:
+- `page`, `page_count`, `page_width`, `page_height`
+- `image_width`, `image_height`, `image_base64`
+- `matched_bbox`
+- `match_mode`: `exact | fuzzy | char_range | none`
+- `match_confidence`: `0..1`
+- `used_snippet`: matched probe when snippet matching succeeds
+- `bbox_source`: `matched_snippet | citation_bbox | none`
+- `warning_code`: optional fallback reason
+
+Contract notes:
+- If snippet overlap is below threshold, response uses `match_mode=none` and `matched_bbox=null` unless explicit bbox fallback is provided.
+- Consumers should treat low-confidence (`<0.55`) anchors as no-box fallback for review safety.
 
 ## 4. Async, Cancellation, and Regeneration Contracts
 ### Async lifecycle

@@ -206,6 +206,7 @@ class SQLiteDB:
                         body TEXT NOT NULL,
                         author TEXT,
                         approved INTEGER NOT NULL DEFAULT 0,
+                        resolved INTEGER NOT NULL DEFAULT 0,
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL,
                         FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
@@ -302,6 +303,7 @@ class SQLiteDB:
                     "TEXT NOT NULL DEFAULT 'SKIPPED'",
                 )
                 self._ensure_column(conn, "field_extractions", "uncertainty_reason", "TEXT")
+                self._ensure_column(conn, "annotations", "resolved", "INTEGER NOT NULL DEFAULT 0")
 
     @staticmethod
     def _ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, column_sql: str) -> None:

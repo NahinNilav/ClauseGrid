@@ -18,7 +18,7 @@ Legacy frontend-direct Gemini extraction is explicitly not part of this main wor
 - Create project from sidebar (`POST /api/projects`).
 - Select project to load context (`GET /api/projects/{id}`).
 - Delete project (`DELETE /api/projects/{id}` with POST fallback alias).
-- Update project status/name/description is API-supported (`PATCH /api/projects/{id}`), though no dedicated edit form is currently rendered in `App.tsx`.
+- Update project status/name/description via header edit form (`PATCH /api/projects/{id}`).
 
 ### 3.2 Document ingestion workflow
 - Upload one or more docs in Documents tab.
@@ -30,7 +30,7 @@ Legacy frontend-direct Gemini extraction is explicitly not part of this main wor
 - Create template with field list and policies.
 - Create new immutable template version from draft fields.
 - Select active template/version for review table.
-- Template create/version actions can auto-trigger extraction tasks.
+- Template create/version actions auto-trigger extraction tasks when parsed docs exist.
 
 ### 3.4 Extraction workflow
 - Run extraction from Table tab with:
@@ -55,7 +55,8 @@ Legacy frontend-direct Gemini extraction is explicitly not part of this main wor
 ### 3.6 Annotation workflow
 - Annotation can be attached to current document-version + field.
 - Annotation is non-destructive and does not modify AI value.
-- Separate Annotations tab lists existing comments.
+- Review panel shows per-cell annotation thread and supports edit/approve/resolve/delete.
+- Separate Annotations tab lists existing comments with approval/resolution state.
 
 ### 3.7 Evaluation workflow (AI vs human)
 - User pastes JSON label list into Evaluation tab and saves ground truth set.

@@ -248,6 +248,22 @@ def _value_from_block(field: Dict[str, Any], block_text: str) -> str:
     return first_sentence[:320]
 
 
+def _normalize_bbox_coords(raw_bbox: Any) -> Optional[List[float]]:
+    if not isinstance(raw_bbox, (list, tuple)) or len(raw_bbox) != 4:
+        return None
+    try:
+        x0, y0, x1, y1 = [float(value) for value in raw_bbox]
+    except (TypeError, ValueError):
+        return None
+    left = min(x0, x1)
+    right = max(x0, x1)
+    bottom = min(y0, y1)
+    top = max(y0, y1)
+    if right <= left or top <= bottom:
+        return None
+    return [left, bottom, right, top]
+
+
 def _citations_with_doc_version(
     citations: List[Dict[str, Any]],
     doc_version_id: str,
@@ -257,6 +273,12 @@ def _citations_with_doc_version(
         if not isinstance(item, dict):
             continue
         payload = dict(item)
+        if "bbox" in payload:
+            normalized_bbox = _normalize_bbox_coords(payload.get("bbox"))
+            if normalized_bbox:
+                payload["bbox"] = normalized_bbox
+            else:
+                payload.pop("bbox", None)
         payload["doc_version_id"] = doc_version_id
         output.append(payload)
     return output
@@ -797,6 +819,52 @@ class LegalReviewService:
         )
         return bool(row and row.get("source_available"))
 
+    def _project_id_for_document_version(self, document_version_id: str) -> Optional[str]:
+        row = self.db.fetch_one(
+            """
+            SELECT d.project_id AS project_id
+            FROM document_versions dv
+            JOIN documents d ON d.id = dv.document_id
+            WHERE dv.id=:document_version_id
+            """,
+            {"document_version_id": document_version_id},
+        )
+        return str(row.get("project_id")) if row and row.get("project_id") else None
+
+    def _project_id_for_template_version(self, template_version_id: str) -> Optional[str]:
+        row = self.db.fetch_one(
+            """
+            SELECT t.project_id AS project_id
+            FROM field_template_versions tv
+            JOIN field_templates t ON t.id = tv.template_id
+            WHERE tv.id=:template_version_id
+            """,
+            {"template_version_id": template_version_id},
+        )
+        return str(row.get("project_id")) if row and row.get("project_id") else None
+
+    def _project_id_for_extraction_run(self, extraction_run_id: str) -> Optional[str]:
+        row = self.db.fetch_one(
+            """
+            SELECT project_id
+            FROM extraction_runs
+            WHERE id=:extraction_run_id
+            """,
+            {"extraction_run_id": extraction_run_id},
+        )
+        return str(row.get("project_id")) if row and row.get("project_id") else None
+
+    def _project_id_for_ground_truth_set(self, ground_truth_set_id: str) -> Optional[str]:
+        row = self.db.fetch_one(
+            """
+            SELECT project_id
+            FROM ground_truth_sets
+            WHERE id=:ground_truth_set_id
+            """,
+            {"ground_truth_set_id": ground_truth_set_id},
+        )
+        return str(row.get("project_id")) if row and row.get("project_id") else None
+
     def latest_document_versions_for_project(self, project_id: str) -> List[Dict[str, Any]]:
         rows = self.db.fetch_all(
             """
@@ -1019,6 +1087,9 @@ class LegalReviewService:
         template_version = self.get_template_version(template_version_id)
         if not template_version:
             raise ValueError("Template version not found")
+        template_project_id = self._project_id_for_template_version(template_version_id)
+        if template_project_id != project_id:
+            raise ValueError("Template version does not belong to project")
         selected_mode = mode if mode in EXTRACTION_MODE else "hybrid"
         selected_quality_profile = quality_profile if quality_profile in QUALITY_PROFILE else "fast"
         run = {
@@ -1636,6 +1707,48 @@ class LegalReviewService:
         except (TypeError, ValueError):
             return None
 
+    @staticmethod
+    def _citation_page_from_list(citations: List[Dict[str, Any]]) -> Optional[int]:
+        for citation in citations or []:
+            if not isinstance(citation, dict):
+                continue
+            page = LegalReviewService._citation_page(citation)
+            if page is not None:
+                return page
+        return None
+
+    @staticmethod
+    def _early_page_boost(field_key: str, page: Optional[int]) -> float:
+        normalized_field = _normalize_space(field_key).lower()
+        if normalized_field not in {"document_title", "parties_entities", "effective_date_term"}:
+            return 0.0
+        if page is None:
+            return 0.0
+        if page <= 3:
+            return 0.35
+        if page <= 10:
+            return 0.2
+        return 0.0
+
+    @classmethod
+    def _boost_near_tie_for_early_pages(
+        cls,
+        *,
+        field_key: str,
+        candidates: List[Tuple[float, str, bool, List[Dict[str, Any]]]],
+    ) -> List[Tuple[float, str, bool, List[Dict[str, Any]]]]:
+        if len(candidates) < 2:
+            return candidates
+        ranked = sorted(candidates, key=lambda item: item[0], reverse=True)
+        if ranked[0][0] - ranked[1][0] >= 0.4:
+            return candidates
+
+        boosted: List[Tuple[float, str, bool, List[Dict[str, Any]]]] = []
+        for score, block_id, explicit_match, citations in candidates:
+            page = cls._citation_page_from_list(citations)
+            boosted.append((score + cls._early_page_boost(field_key, page), block_id, explicit_match, citations))
+        return boosted
+
     @classmethod
     def _score_block_for_anchor(
         cls,
@@ -1675,7 +1788,12 @@ class LegalReviewService:
             score += 0.35
 
         if "confidential treatment requested by tesla" in normalized_block and not explicit_match:
-            score -= 0.25
+            score -= 0.85
+            if (
+                cls._text_overlap_score(block_text, value) < 0.15
+                and cls._text_overlap_score(block_text, raw_text) < 0.18
+            ):
+                score -= 0.45
 
         return score, explicit_match
 
@@ -1703,6 +1821,7 @@ class LegalReviewService:
         *,
         selected_candidate: Dict[str, Any],
         retrieval_block_by_id: Dict[str, Dict[str, Any]],
+        field_key: str,
         value: str,
         raw_text: str,
     ) -> Dict[str, Any]:
@@ -1745,10 +1864,7 @@ class LegalReviewService:
 
         date_probes = cls._date_probe_variants(value)
 
-        segment_best_block_id: Optional[str] = None
-        segment_best_score = -1.0
-        segment_primary_citations: List[Dict[str, Any]] = []
-        segment_explicit_match = False
+        segment_candidates: List[Tuple[float, str, bool, List[Dict[str, Any]]]] = []
         for block_id in segment_block_ids:
             block = retrieval_block_by_id.get(block_id)
             if not isinstance(block, dict):
@@ -1764,20 +1880,20 @@ class LegalReviewService:
                 date_probes=date_probes,
                 source_boost=block_id in source_block_ids,
             )
-            if score > segment_best_score:
-                segment_best_score = score
-                segment_best_block_id = block_id
-                segment_explicit_match = explicit_match
-                segment_primary_citations = [
-                    dict(citation)
-                    for citation in (block.get("citations") or [])
-                    if isinstance(citation, dict)
-                ]
+            segment_candidates.append(
+                (
+                    score,
+                    block_id,
+                    explicit_match,
+                    [
+                        dict(citation)
+                        for citation in (block.get("citations") or [])
+                        if isinstance(citation, dict)
+                    ],
+                )
+            )
 
-        global_best_block_id: Optional[str] = None
-        global_best_score = -1.0
-        global_primary_citations: List[Dict[str, Any]] = []
-        global_explicit_match = False
+        global_candidates: List[Tuple[float, str, bool, List[Dict[str, Any]]]] = []
         for block_id, block in retrieval_block_by_id.items():
             if not isinstance(block, dict):
                 continue
@@ -1791,15 +1907,50 @@ class LegalReviewService:
                 date_probes=date_probes,
                 source_boost=False,
             )
+
+            global_candidates.append(
+                (
+                    score,
+                    str(block_id or ""),
+                    explicit_match,
+                    [
+                        dict(citation)
+                        for citation in (block.get("citations") or [])
+                        if isinstance(citation, dict)
+                    ],
+                )
+            )
+
+        segment_candidates = cls._boost_near_tie_for_early_pages(
+            field_key=field_key,
+            candidates=segment_candidates,
+        )
+        global_candidates = cls._boost_near_tie_for_early_pages(
+            field_key=field_key,
+            candidates=global_candidates,
+        )
+
+        segment_best_score = -1.0
+        segment_best_block_id: Optional[str] = None
+        segment_primary_citations: List[Dict[str, Any]] = []
+        segment_explicit_match = False
+        for score, block_id, explicit_match, citations in segment_candidates:
+            if score > segment_best_score:
+                segment_best_score = score
+                segment_best_block_id = block_id
+                segment_explicit_match = explicit_match
+                segment_primary_citations = citations
+
+        global_best_score = -1.0
+        global_best_block_id: Optional[str] = None
+        global_primary_citations: List[Dict[str, Any]] = []
+        global_explicit_match = False
+        for score, block_id, explicit_match, citations in global_candidates:
             if score > global_best_score:
                 global_best_score = score
-                global_best_block_id = str(block_id or "")
+                global_best_block_id = block_id
                 global_explicit_match = explicit_match
-                global_primary_citations = [
-                    dict(citation)
-                    for citation in (block.get("citations") or [])
-                    if isinstance(citation, dict)
-                ]
+                global_primary_citations = citations
 
         segment_best_score = max(0.0, segment_best_score)
         global_best_score = max(0.0, global_best_score)
@@ -2210,6 +2361,7 @@ class LegalReviewService:
             anchor_details = self._prioritize_candidate_citations(
                 selected_candidate=selected,
                 retrieval_block_by_id=retrieval_block_by_id,
+                field_key=field_key,
                 value=value,
                 raw_text=raw_text,
             )
@@ -2395,6 +2547,21 @@ class LegalReviewService:
     ) -> Dict[str, Any]:
         if status not in REVIEW_STATUS:
             raise ValueError("Invalid review status")
+        doc_project_id = self._project_id_for_document_version(document_version_id)
+        if doc_project_id != project_id:
+            raise ValueError("Document version does not belong to project")
+        template_project_id = self._project_id_for_template_version(template_version_id)
+        if template_project_id != project_id:
+            raise ValueError("Template version does not belong to project")
+
+        template_version = self.get_template_version(template_version_id)
+        field_keys = {
+            str(field.get("key") or field.get("id") or field.get("name"))
+            for field in (template_version or {}).get("fields_json") or []
+        }
+        if field_key not in field_keys:
+            raise ValueError("Field key does not exist in template version")
+
         existing = self.db.fetch_one(
             """
             SELECT id FROM review_decisions
@@ -2541,6 +2708,25 @@ class LegalReviewService:
         dec_map: Dict[Tuple[str, str], Dict[str, Any]] = {}
         for dec in decisions:
             dec_map[(dec["document_version_id"], dec["field_key"])] = dec
+        annotations = self.list_annotations(project_id, template_version_id)
+        ann_map: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        for ann in annotations:
+            key = (str(ann.get("document_version_id") or ""), str(ann.get("field_key") or ""))
+            ann_map.setdefault(key, []).append(ann)
+
+        def _cell_comparison_values(
+            ai_result: Dict[str, Any] | None,
+            review: Dict[str, Any] | None,
+        ) -> Tuple[str, str, str]:
+            if review and review.get("status") == "MANUAL_UPDATED":
+                manual = str(review.get("manual_value") or "")
+                return manual, _normalize_space(manual).lower(), "manual_value"
+
+            ai_value = str((ai_result or {}).get("value") or "")
+            normalized = _normalize_space(str((ai_result or {}).get("normalized_value") or ""))
+            if normalized:
+                return ai_value, normalized.lower(), "normalized_value"
+            return ai_value, _normalize_space(ai_value).lower(), "value"
 
         documents = self.latest_document_versions_for_project(project_id)
         rows: List[Dict[str, Any]] = []
@@ -2555,18 +2741,21 @@ class LegalReviewService:
             if first:
                 baseline_doc_version = first["latest_version"]["id"]
 
-        baseline_values: Dict[str, str] = {}
+        baseline_values: Dict[str, Dict[str, str]] = {}
         if baseline_doc_version:
             for field in field_list:
                 key = str(field.get("key") or field.get("id") or field.get("name"))
                 baseline_extraction = ext_map.get((baseline_doc_version, key))
                 baseline_decision = dec_map.get((baseline_doc_version, key))
-                base_val = ""
-                if baseline_decision and baseline_decision.get("status") == "MANUAL_UPDATED":
-                    base_val = baseline_decision.get("manual_value") or ""
-                elif baseline_extraction:
-                    base_val = baseline_extraction.get("value") or ""
-                baseline_values[key] = _normalize_space(base_val).lower()
+                baseline_display, baseline_compare, baseline_mode = _cell_comparison_values(
+                    baseline_extraction,
+                    baseline_decision,
+                )
+                baseline_values[key] = {
+                    "display": baseline_display,
+                    "compare": baseline_compare,
+                    "mode": baseline_mode,
+                }
 
         for doc in documents:
             latest = doc.get("latest_version")
@@ -2577,18 +2766,24 @@ class LegalReviewService:
                 field_key = str(field.get("key") or field.get("id") or field.get("name"))
                 ai_result = ext_map.get((latest["id"], field_key))
                 review = dec_map.get((latest["id"], field_key))
-                ai_value = (ai_result or {}).get("value") or ""
-                effective_value = ai_value
-                if review and review.get("status") == "MANUAL_UPDATED":
-                    effective_value = review.get("manual_value") or ""
-                diff_baseline = baseline_values.get(field_key, "")
-                is_diff = bool(diff_baseline and _normalize_space(effective_value).lower() != diff_baseline)
+                effective_value, current_compare, compare_mode = _cell_comparison_values(ai_result, review)
+                baseline = baseline_values.get(field_key) or {
+                    "display": "",
+                    "compare": "",
+                    "mode": "value",
+                }
+                is_diff = bool(current_compare != str(baseline.get("compare") or ""))
+                annotations_for_cell = ann_map.get((latest["id"], field_key), [])
                 row_cells[field_key] = {
                     "field_key": field_key,
                     "ai_result": ai_result,
                     "review_overlay": review,
                     "effective_value": effective_value,
                     "is_diff": is_diff,
+                    "baseline_value": str(baseline.get("display") or ""),
+                    "current_value": effective_value,
+                    "compare_mode": compare_mode,
+                    "annotation_count": len(annotations_for_cell),
                 }
 
             rows.append(
@@ -2679,6 +2874,10 @@ class LegalReviewService:
         ground_truth_set_id: str,
         extraction_run_id: str,
     ) -> Dict[str, Any]:
+        if self._project_id_for_ground_truth_set(ground_truth_set_id) != project_id:
+            raise ValueError("Ground truth set does not belong to project")
+        if self._project_id_for_extraction_run(extraction_run_id) != project_id:
+            raise ValueError("Extraction run does not belong to project")
         now = utc_now_iso()
         run = {
             "id": _new_id("evr"),
@@ -2889,7 +3088,23 @@ class LegalReviewService:
         body: str,
         author: str | None,
         approved: bool = False,
+        resolved: bool = False,
     ) -> Dict[str, Any]:
+        doc_project_id = self._project_id_for_document_version(document_version_id)
+        if doc_project_id != project_id:
+            raise ValueError("Document version does not belong to project")
+        template_project_id = self._project_id_for_template_version(template_version_id)
+        if template_project_id != project_id:
+            raise ValueError("Template version does not belong to project")
+
+        template_version = self.get_template_version(template_version_id)
+        field_keys = {
+            str(field.get("key") or field.get("id") or field.get("name"))
+            for field in (template_version or {}).get("fields_json") or []
+        }
+        if field_key not in field_keys:
+            raise ValueError("Field key does not exist in template version")
+
         now = utc_now_iso()
         annotation = {
             "id": _new_id("ann"),
@@ -2900,6 +3115,7 @@ class LegalReviewService:
             "body": body.strip(),
             "author": author or "reviewer",
             "approved": 1 if approved else 0,
+            "resolved": 1 if resolved else 0,
             "created_at": now,
             "updated_at": now,
         }
@@ -2907,11 +3123,11 @@ class LegalReviewService:
             """
             INSERT INTO annotations(
                 id, project_id, document_version_id, template_version_id,
-                field_key, body, author, approved, created_at, updated_at
+                field_key, body, author, approved, resolved, created_at, updated_at
             )
             VALUES(
                 :id, :project_id, :document_version_id, :template_version_id,
-                :field_key, :body, :author, :approved, :created_at, :updated_at
+                :field_key, :body, :author, :approved, :resolved, :created_at, :updated_at
             )
             """,
             annotation,
@@ -2922,24 +3138,106 @@ class LegalReviewService:
             action="annotation_created",
             entity_type="annotation",
             entity_id=annotation["id"],
-            payload={"field_key": field_key, "approved": bool(annotation["approved"])},
+            payload={
+                "field_key": field_key,
+                "approved": bool(annotation["approved"]),
+                "resolved": bool(annotation["resolved"]),
+            },
         )
         return self.db.fetch_one(
             """
             SELECT id, project_id, document_version_id, template_version_id, field_key,
-                   body, author, approved, created_at, updated_at
+                   body, author, approved, resolved, created_at, updated_at
             FROM annotations
             WHERE id=:id
             """,
             {"id": annotation["id"]},
         ) or annotation
 
+    def get_annotation(self, annotation_id: str) -> Optional[Dict[str, Any]]:
+        return self.db.fetch_one(
+            """
+            SELECT id, project_id, document_version_id, template_version_id, field_key,
+                   body, author, approved, resolved, created_at, updated_at
+            FROM annotations
+            WHERE id=:annotation_id
+            """,
+            {"annotation_id": annotation_id},
+        )
+
+    def update_annotation(
+        self,
+        *,
+        project_id: str,
+        annotation_id: str,
+        body: str | None = None,
+        approved: bool | None = None,
+        resolved: bool | None = None,
+        author: str | None = None,
+    ) -> Dict[str, Any]:
+        annotation = self.get_annotation(annotation_id)
+        if not annotation:
+            raise ValueError("Annotation not found")
+        if str(annotation.get("project_id") or "") != project_id:
+            raise ValueError("Annotation does not belong to project")
+
+        updates = {
+            "id": annotation_id,
+            "body": body.strip() if isinstance(body, str) else str(annotation.get("body") or ""),
+            "approved": 1 if approved else 0 if approved is not None else int(annotation.get("approved") or 0),
+            "resolved": 1 if resolved else 0 if resolved is not None else int(annotation.get("resolved") or 0),
+            "author": author.strip() if isinstance(author, str) and author.strip() else (annotation.get("author") or "reviewer"),
+            "updated_at": utc_now_iso(),
+        }
+
+        self.db.execute(
+            """
+            UPDATE annotations
+            SET body=:body,
+                approved=:approved,
+                resolved=:resolved,
+                author=:author,
+                updated_at=:updated_at
+            WHERE id=:id
+            """,
+            updates,
+        )
+        self._audit(
+            project_id=project_id,
+            actor=updates["author"],
+            action="annotation_updated",
+            entity_type="annotation",
+            entity_id=annotation_id,
+            payload={
+                "approved": bool(updates["approved"]),
+                "resolved": bool(updates["resolved"]),
+            },
+        )
+        return self.get_annotation(annotation_id) or {}
+
+    def delete_annotation(self, *, project_id: str, annotation_id: str) -> bool:
+        annotation = self.get_annotation(annotation_id)
+        if not annotation:
+            return False
+        if str(annotation.get("project_id") or "") != project_id:
+            raise ValueError("Annotation does not belong to project")
+        self.db.execute("DELETE FROM annotations WHERE id=:annotation_id", {"annotation_id": annotation_id})
+        self._audit(
+            project_id=project_id,
+            actor=str(annotation.get("author") or "reviewer"),
+            action="annotation_deleted",
+            entity_type="annotation",
+            entity_id=annotation_id,
+            payload={"field_key": annotation.get("field_key")},
+        )
+        return True
+
     def list_annotations(self, project_id: str, template_version_id: str | None = None) -> List[Dict[str, Any]]:
         if template_version_id:
             return self.db.fetch_all(
                 """
                 SELECT id, project_id, document_version_id, template_version_id, field_key,
-                       body, author, approved, created_at, updated_at
+                       body, author, approved, resolved, created_at, updated_at
                 FROM annotations
                 WHERE project_id=:project_id AND template_version_id=:template_version_id
                 ORDER BY created_at DESC
@@ -2949,7 +3247,7 @@ class LegalReviewService:
         return self.db.fetch_all(
             """
             SELECT id, project_id, document_version_id, template_version_id, field_key,
-                   body, author, approved, created_at, updated_at
+                   body, author, approved, resolved, created_at, updated_at
             FROM annotations
             WHERE project_id=:project_id
             ORDER BY created_at DESC

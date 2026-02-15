@@ -4,13 +4,15 @@ import os
 import tempfile
 import uuid
 from base64 import b64encode
+from io import StringIO
+import csv
 from typing import Any, Dict, List, Optional
 
 from docling.datamodel.base_models import InputFormat
 from docling.document_converter import DocumentConverter, HTMLFormatOption
 from fastapi import APIRouter, BackgroundTasks, File, Form, UploadFile
 from pydantic import BaseModel, Field
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 
 from artifact_schema import build_citation_index, make_artifact
 from chunker import chunk_blocks
@@ -19,6 +21,7 @@ from mime_router import route_file
 from parsers.docx_docling import parse_docx_with_docling
 from parsers.html_docling import parse_html_with_docling
 from parsers.pdf_docling import parse_pdf
+from parsers.pdf_runtime import acquire_parse_slot
 from parsers.text_plain import parse_text
 
 
@@ -113,6 +116,8 @@ def _parse_document_to_artifact(
             "dom_map_size": parser_result.get("dom_map_size"),
             "worker_error": parser_result.get("worker_error"),
             "page_index": parser_result.get("page_index", {}),
+            "pdf_docling_mode_effective": parser_result.get("pdf_docling_mode_effective"),
+            "pdf_docling_disable_reason": parser_result.get("pdf_docling_disable_reason"),
         },
     )
     return artifact, {
@@ -178,15 +183,35 @@ def _run_parse_task(
     if task.get("status") == "CANCELED":
         return
 
-    service.update_task(task_id, status="RUNNING", progress_current=0, progress_total=1)
-    if service.is_task_canceled(task_id):
-        return
+    queue_wait_ms = 0.0
+    parser_runtime: Dict[str, Any] = {}
     try:
-        artifact, routed = _parse_document_to_artifact(
-            raw_bytes=raw_bytes,
-            filename=filename,
-            declared_mime_type=declared_mime_type,
-        )
+        with acquire_parse_slot() as waited_ms:
+            queue_wait_ms = round(waited_ms, 2)
+            if service.is_task_canceled(task_id):
+                return
+            service.update_task(
+                task_id,
+                status="RUNNING",
+                progress_current=0,
+                progress_total=1,
+                payload={
+                    "document_id": document_id,
+                    "filename": filename,
+                    "queue_wait_ms": queue_wait_ms,
+                },
+            )
+            if service.is_task_canceled(task_id):
+                return
+            artifact, routed = _parse_document_to_artifact(
+                raw_bytes=raw_bytes,
+                filename=filename,
+                declared_mime_type=declared_mime_type,
+            )
+        parser_runtime = {
+            "pdf_docling_mode_effective": (artifact.get("metadata") or {}).get("pdf_docling_mode_effective"),
+            "pdf_docling_disable_reason": (artifact.get("metadata") or {}).get("pdf_docling_disable_reason"),
+        }
         if service.is_task_canceled(task_id):
             service.update_task(task_id, status="CANCELED", error_message="Canceled by user.")
             return
@@ -212,7 +237,12 @@ def _run_parse_task(
             "document_version_id": doc_version["id"],
             "format": routed["format"],
             "source_stored": source_stored,
+            "queue_wait_ms": queue_wait_ms,
         }
+        if parser_runtime.get("pdf_docling_mode_effective") is not None:
+            payload["pdf_docling_mode_effective"] = parser_runtime.get("pdf_docling_mode_effective")
+        if parser_runtime.get("pdf_docling_disable_reason"):
+            payload["pdf_docling_disable_reason"] = parser_runtime.get("pdf_docling_disable_reason")
 
         active = service.active_template_for_project(project_id)
         if active and active.get("active_version_id"):
@@ -253,7 +283,16 @@ def _run_parse_task(
         if service.is_task_canceled(task_id):
             service.update_task(task_id, status="CANCELED", error_message="Canceled by user.")
             return
-        service.update_task(task_id, status="FAILED", error_message=str(exc))
+        error_payload: Dict[str, Any] = {
+            "document_id": document_id,
+            "filename": filename,
+            "queue_wait_ms": queue_wait_ms,
+        }
+        if parser_runtime.get("pdf_docling_mode_effective") is not None:
+            error_payload["pdf_docling_mode_effective"] = parser_runtime.get("pdf_docling_mode_effective")
+        if parser_runtime.get("pdf_docling_disable_reason"):
+            error_payload["pdf_docling_disable_reason"] = parser_runtime.get("pdf_docling_disable_reason")
+        service.update_task(task_id, status="FAILED", error_message=str(exc), payload=error_payload)
 
 
 def _run_evaluation_task(task_id: str, evaluation_run_id: str) -> None:
@@ -294,6 +333,37 @@ def _run_evaluation_task(task_id: str, evaluation_run_id: str) -> None:
             return
         service.mark_evaluation_run_failed(evaluation_run_id, str(exc))
         service.update_task(task_id, status="FAILED", error_message=str(exc))
+
+
+def _project_has_completed_documents(project_id: str) -> bool:
+    documents = service.latest_document_versions_for_project(project_id)
+    for document in documents:
+        latest = document.get("latest_version") or {}
+        if str(latest.get("parse_status") or "") == "COMPLETED":
+            return True
+    return False
+
+
+def _queue_extraction_for_template_version(
+    *,
+    project_id: str,
+    template_version_id: str,
+    trigger_reason: str,
+    background_tasks: BackgroundTasks,
+) -> str:
+    run = service.create_extraction_run(
+        project_id=project_id,
+        template_version_id=template_version_id,
+        trigger_reason=trigger_reason,
+    )
+    task = service.create_task(
+        task_type="EXTRACTION_RUN",
+        project_id=project_id,
+        entity_id=run["id"],
+        payload={"run_id": run["id"]},
+    )
+    background_tasks.add_task(_run_extraction_task, task["id"], run["id"])
+    return task["id"]
 
 
 class FieldDefinition(BaseModel):
@@ -370,6 +440,14 @@ class AnnotationRequest(BaseModel):
     body: str
     author: str | None = None
     approved: bool = False
+    resolved: bool = False
+
+
+class UpdateAnnotationRequest(BaseModel):
+    body: str | None = None
+    author: str | None = None
+    approved: bool | None = None
+    resolved: bool | None = None
 
 
 router = APIRouter(prefix="/api")
@@ -515,7 +593,7 @@ def get_document_version_source(document_version_id: str):
 
 
 @router.post("/projects/{project_id}/templates")
-def create_template(project_id: str, payload: CreateTemplateRequest):
+def create_template(project_id: str, payload: CreateTemplateRequest, background_tasks: BackgroundTasks):
     if not service.get_project(project_id):
         return _problem(404, "Project Not Found", "Project does not exist", instance=f"/api/projects/{project_id}/templates")
 
@@ -530,11 +608,23 @@ def create_template(project_id: str, payload: CreateTemplateRequest):
     except ValueError as exc:
         return _problem(400, "Template Creation Failed", str(exc), instance=f"/api/projects/{project_id}/templates")
 
-    return {"template": template, "template_version": version}
+    triggered_extraction_task_id: str | None = None
+    if _project_has_completed_documents(project_id):
+        triggered_extraction_task_id = _queue_extraction_for_template_version(
+            project_id=project_id,
+            template_version_id=version["id"],
+            trigger_reason="TEMPLATE_CREATED",
+            background_tasks=background_tasks,
+        )
+
+    response = {"template": template, "template_version": version}
+    if triggered_extraction_task_id:
+        response["triggered_extraction_task_id"] = triggered_extraction_task_id
+    return response
 
 
 @router.post("/templates/{template_id}/versions")
-def create_template_version(template_id: str, payload: CreateTemplateVersionRequest):
+def create_template_version(template_id: str, payload: CreateTemplateVersionRequest, background_tasks: BackgroundTasks):
     template = service.get_template(template_id)
     if not template:
         return _problem(404, "Template Not Found", "Template does not exist", instance=f"/api/templates/{template_id}/versions")
@@ -548,7 +638,20 @@ def create_template_version(template_id: str, payload: CreateTemplateVersionRequ
     except ValueError as exc:
         return _problem(400, "Template Version Failed", str(exc), instance=f"/api/templates/{template_id}/versions")
 
-    return {"template_version": version}
+    project_id = str(template.get("project_id") or "")
+    triggered_extraction_task_id: str | None = None
+    if project_id and _project_has_completed_documents(project_id):
+        triggered_extraction_task_id = _queue_extraction_for_template_version(
+            project_id=project_id,
+            template_version_id=version["id"],
+            trigger_reason="TEMPLATE_VERSION_UPDATED",
+            background_tasks=background_tasks,
+        )
+
+    response = {"template_version": version}
+    if triggered_extraction_task_id:
+        response["triggered_extraction_task_id"] = triggered_extraction_task_id
+    return response
 
 
 @router.get("/projects/{project_id}/templates")
@@ -573,13 +676,16 @@ def create_extraction_run(project_id: str, payload: CreateExtractionRunRequest, 
                 instance=f"/api/projects/{project_id}/extraction-runs",
             )
         template_version_id = active["active_version_id"]
-    run = service.create_extraction_run(
-        project_id=project_id,
-        template_version_id=template_version_id,
-        trigger_reason="MANUAL_TRIGGER",
-        mode=payload.mode,
-        quality_profile=payload.quality_profile,
-    )
+    try:
+        run = service.create_extraction_run(
+            project_id=project_id,
+            template_version_id=template_version_id,
+            trigger_reason="MANUAL_TRIGGER",
+            mode=payload.mode,
+            quality_profile=payload.quality_profile,
+        )
+    except ValueError as exc:
+        return _problem(400, "Extraction Run Failed", str(exc), instance=f"/api/projects/{project_id}/extraction-runs")
     task = service.create_task(
         task_type="EXTRACTION_RUN",
         project_id=project_id,
@@ -627,22 +733,125 @@ def get_table_view(project_id: str, template_version_id: str | None = None, base
     return view
 
 
+@router.get("/projects/{project_id}/table-export.csv")
+def export_table_csv(
+    project_id: str,
+    template_version_id: str | None = None,
+    baseline_document_id: str | None = None,
+    value_mode: str = "effective",
+):
+    if not service.get_project(project_id):
+        return _problem(
+            404,
+            "Project Not Found",
+            "Project does not exist",
+            instance=f"/api/projects/{project_id}/table-export.csv",
+        )
+    mode = str(value_mode or "effective").strip().lower()
+    if mode not in {"effective", "ai"}:
+        return _problem(
+            400,
+            "Invalid Value Mode",
+            "value_mode must be one of: effective, ai",
+            instance=f"/api/projects/{project_id}/table-export.csv",
+        )
+    try:
+        view = service.table_view(
+            project_id=project_id,
+            template_version_id=template_version_id,
+            baseline_document_id=baseline_document_id,
+        )
+    except ValueError as exc:
+        return _problem(
+            400,
+            "Table Export Failed",
+            str(exc),
+            instance=f"/api/projects/{project_id}/table-export.csv",
+        )
+
+    output = StringIO()
+    writer = csv.writer(output)
+    writer.writerow(
+        [
+            "document_id",
+            "document_version_id",
+            "filename",
+            "field_key",
+            "field_name",
+            "value_mode",
+            "export_value",
+            "effective_value",
+            "ai_value",
+            "review_status",
+            "confidence_score",
+            "citations_json",
+            "is_diff",
+            "baseline_value",
+            "current_value",
+            "compare_mode",
+            "annotation_count",
+        ]
+    )
+
+    columns = view.get("columns") or []
+    for row in view.get("rows") or []:
+        for field in columns:
+            field_key = str(field.get("key") or field.get("id") or field.get("name"))
+            cell = ((row.get("cells") or {}).get(field_key) or {})
+            ai_result = cell.get("ai_result") or {}
+            ai_value = str(ai_result.get("value") or "")
+            effective_value = str(cell.get("effective_value") or "")
+            export_value = ai_value if mode == "ai" else effective_value
+            writer.writerow(
+                [
+                    row.get("document_id") or "",
+                    row.get("document_version_id") or "",
+                    row.get("filename") or "",
+                    field_key,
+                    str(field.get("name") or field_key),
+                    mode,
+                    export_value,
+                    effective_value,
+                    ai_value,
+                    str((cell.get("review_overlay") or {}).get("status") or ""),
+                    ai_result.get("confidence_score") if ai_result else "",
+                    json.dumps(ai_result.get("citations_json") or [], ensure_ascii=False),
+                    "1" if cell.get("is_diff") else "0",
+                    cell.get("baseline_value") or "",
+                    cell.get("current_value") or "",
+                    cell.get("compare_mode") or "",
+                    int(cell.get("annotation_count") or 0),
+                ]
+            )
+
+    csv_payload = output.getvalue()
+    filename = f"project_{project_id}_table_export.csv"
+    return Response(
+        content=csv_payload,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.post("/projects/{project_id}/review-decisions")
 def upsert_review(project_id: str, payload: ReviewDecisionRequest):
     if not service.get_project(project_id):
         return _problem(404, "Project Not Found", "Project does not exist", instance=f"/api/projects/{project_id}/review-decisions")
     if payload.status not in REVIEW_STATUS:
         return _problem(400, "Invalid Review Status", f"Status must be one of {sorted(REVIEW_STATUS)}")
-    decision = service.upsert_review_decision(
-        project_id=project_id,
-        document_version_id=payload.document_version_id,
-        template_version_id=payload.template_version_id,
-        field_key=payload.field_key,
-        status=payload.status,
-        manual_value=payload.manual_value,
-        reviewer=payload.reviewer,
-        notes=payload.notes,
-    )
+    try:
+        decision = service.upsert_review_decision(
+            project_id=project_id,
+            document_version_id=payload.document_version_id,
+            template_version_id=payload.template_version_id,
+            field_key=payload.field_key,
+            status=payload.status,
+            manual_value=payload.manual_value,
+            reviewer=payload.reviewer,
+            notes=payload.notes,
+        )
+    except ValueError as exc:
+        return _problem(400, "Review Update Failed", str(exc), instance=f"/api/projects/{project_id}/review-decisions")
     return {"review_decision": decision}
 
 
@@ -671,11 +880,14 @@ def create_ground_truth_set(project_id: str, payload: GroundTruthSetRequest):
 def create_evaluation_run(project_id: str, payload: EvaluationRunRequest, background_tasks: BackgroundTasks):
     if not service.get_project(project_id):
         return _problem(404, "Project Not Found", "Project does not exist", instance=f"/api/projects/{project_id}/evaluation-runs")
-    eval_run = service.create_evaluation_run(
-        project_id=project_id,
-        ground_truth_set_id=payload.ground_truth_set_id,
-        extraction_run_id=payload.extraction_run_id,
-    )
+    try:
+        eval_run = service.create_evaluation_run(
+            project_id=project_id,
+            ground_truth_set_id=payload.ground_truth_set_id,
+            extraction_run_id=payload.extraction_run_id,
+        )
+    except ValueError as exc:
+        return _problem(400, "Evaluation Run Failed", str(exc), instance=f"/api/projects/{project_id}/evaluation-runs")
     task = service.create_task(
         task_type="EVALUATION_RUN",
         project_id=project_id,
@@ -705,15 +917,19 @@ def get_evaluation_run(project_id: str, eval_run_id: str):
 def create_annotation(project_id: str, payload: AnnotationRequest):
     if not service.get_project(project_id):
         return _problem(404, "Project Not Found", "Project does not exist", instance=f"/api/projects/{project_id}/annotations")
-    annotation = service.create_annotation(
-        project_id=project_id,
-        document_version_id=payload.document_version_id,
-        template_version_id=payload.template_version_id,
-        field_key=payload.field_key,
-        body=payload.body,
-        author=payload.author,
-        approved=payload.approved,
-    )
+    try:
+        annotation = service.create_annotation(
+            project_id=project_id,
+            document_version_id=payload.document_version_id,
+            template_version_id=payload.template_version_id,
+            field_key=payload.field_key,
+            body=payload.body,
+            author=payload.author,
+            approved=payload.approved,
+            resolved=payload.resolved,
+        )
+    except ValueError as exc:
+        return _problem(400, "Annotation Creation Failed", str(exc), instance=f"/api/projects/{project_id}/annotations")
     return {"annotation": annotation}
 
 
@@ -723,6 +939,65 @@ def list_annotations(project_id: str, template_version_id: str | None = None):
         return _problem(404, "Project Not Found", "Project does not exist", instance=f"/api/projects/{project_id}/annotations")
     annotations = service.list_annotations(project_id, template_version_id=template_version_id)
     return {"annotations": annotations}
+
+
+@router.patch("/projects/{project_id}/annotations/{annotation_id}")
+def update_annotation(project_id: str, annotation_id: str, payload: UpdateAnnotationRequest):
+    if not service.get_project(project_id):
+        return _problem(
+            404,
+            "Project Not Found",
+            "Project does not exist",
+            instance=f"/api/projects/{project_id}/annotations/{annotation_id}",
+        )
+    try:
+        annotation = service.update_annotation(
+            project_id=project_id,
+            annotation_id=annotation_id,
+            body=payload.body,
+            author=payload.author,
+            approved=payload.approved,
+            resolved=payload.resolved,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        status_code = 404 if "not found" in detail.lower() else 400
+        title = "Annotation Not Found" if status_code == 404 else "Annotation Update Failed"
+        return _problem(
+            status_code,
+            title,
+            detail,
+            instance=f"/api/projects/{project_id}/annotations/{annotation_id}",
+        )
+    return {"annotation": annotation}
+
+
+@router.delete("/projects/{project_id}/annotations/{annotation_id}")
+def delete_annotation(project_id: str, annotation_id: str):
+    if not service.get_project(project_id):
+        return _problem(
+            404,
+            "Project Not Found",
+            "Project does not exist",
+            instance=f"/api/projects/{project_id}/annotations/{annotation_id}",
+        )
+    try:
+        deleted = service.delete_annotation(project_id=project_id, annotation_id=annotation_id)
+    except ValueError as exc:
+        return _problem(
+            400,
+            "Annotation Delete Failed",
+            str(exc),
+            instance=f"/api/projects/{project_id}/annotations/{annotation_id}",
+        )
+    if not deleted:
+        return _problem(
+            404,
+            "Annotation Not Found",
+            "Annotation does not exist",
+            instance=f"/api/projects/{project_id}/annotations/{annotation_id}",
+        )
+    return {"annotation_id": annotation_id, "deleted": True}
 
 
 @router.get("/projects/{project_id}/tasks")

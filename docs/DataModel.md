@@ -20,7 +20,7 @@ The data model supports:
 | `extraction_runs` | `id`, `project_id`, `template_version_id`, `mode`, `quality_profile`, `status` | Batch extraction executions |
 | `field_extractions` | run/doc/field foreign keys + extraction payload fields | One extraction result per table cell |
 | `review_decisions` | `(project_id, document_version_id, template_version_id, field_key)` unique | Human review overlay |
-| `annotations` | doc/template/field keys + `body`, `approved` | Optional non-destructive comments |
+| `annotations` | doc/template/field keys + `body`, `approved`, `resolved` | Optional non-destructive comments with lifecycle state |
 | `ground_truth_sets` | `id`, `project_id`, `name`, `format` | Label collection header |
 | `ground_truth_labels` | `ground_truth_set_id`, `document_version_id`, `field_key`, expected values | Human reference labels |
 | `evaluation_runs` | `id`, `project_id`, `ground_truth_set_id`, `extraction_run_id`, `metrics_json` | Persisted quality scoring |

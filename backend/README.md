@@ -28,6 +28,7 @@ Workflow API
 - `POST /api/projects/{project_id}/extraction-runs`
 - `GET /api/projects/{project_id}/extraction-runs/{run_id}`
 - `GET /api/projects/{project_id}/table-view`
+- `GET /api/projects/{project_id}/table-export.csv`
 - `POST /api/projects/{project_id}/review-decisions`
 - `GET /api/projects/{project_id}/review-decisions`
 - `POST /api/projects/{project_id}/ground-truth-sets`
@@ -35,6 +36,8 @@ Workflow API
 - `GET /api/projects/{project_id}/evaluation-runs/{eval_run_id}`
 - `POST /api/projects/{project_id}/annotations`
 - `GET /api/projects/{project_id}/annotations`
+- `PATCH /api/projects/{project_id}/annotations/{annotation_id}`
+- `DELETE /api/projects/{project_id}/annotations/{annotation_id}`
 - `GET /api/projects/{project_id}/tasks`
 - `POST /api/projects/{project_id}/tasks/cancel-pending`
 - `POST /api/tasks/{task_id}/cancel`
@@ -56,6 +59,20 @@ Database
   - review_decisions, annotations
   - ground_truth_sets, ground_truth_labels, evaluation_runs
   - request_tasks, audit_events
+
+Parser Stability Configuration (Upload/Convert PDF safety)
+- `LEGAL_PARSE_MAX_CONCURRENCY` (default: `1`, minimum: `1`)
+  - Global process-wide parse slot count used by upload parse tasks and `/convert`.
+  - Use `1` for maximum stability on macOS/pdfium workloads.
+- `LEGAL_PDF_DOCLING_MODE` (default: `auto`)
+  - `auto`: try Docling worker while healthy; auto-disable after fatal runtime signatures and continue with Pdfium fallback.
+  - `enabled`: always attempt Docling worker (still falls back to Pdfium on failure).
+  - `disabled`: skip Docling worker and use Pdfium fallback directly.
+
+Task payload diagnostics (for `PARSE_DOCUMENT`) exposed by `GET /api/tasks/{task_id}`:
+- `queue_wait_ms`
+- `pdf_docling_mode_effective`
+- `pdf_docling_disable_reason`
 
 LLM Provider Configuration (Hybrid / LLM Modes)
 - Install deps from `backend/requirements.txt` (includes `openai` and `google-genai`).

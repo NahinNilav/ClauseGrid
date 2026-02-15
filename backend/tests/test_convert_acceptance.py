@@ -80,6 +80,48 @@ class ConvertAcceptanceTests(unittest.TestCase):
         self.assertGreater(payload.get("image_width", 0), 0)
         self.assertGreater(payload.get("image_height", 0), 0)
         self.assertTrue((payload.get("image_base64") or "").strip())
+        self.assertIn(payload.get("match_mode"), {"exact", "fuzzy", "char_range", "none"})
+        self.assertIsInstance(payload.get("match_confidence"), (int, float))
+        self.assertIn(payload.get("bbox_source"), {"matched_snippet", "citation_bbox", "none"})
+
+    def test_pdf_page_render_low_overlap_returns_no_anchor_bbox(self):
+        path = os.path.join(self.data_dir, "tsla-ex103_462.htm.pdf")
+        with open(path, "rb") as f:
+            response = self.client.post(
+                "/render-pdf-page",
+                files={"file": ("tsla-ex103_462.htm.pdf", f, "application/pdf")},
+                data={
+                    "page": "1",
+                    "scale": "1.4",
+                    "snippet": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+                    "snippet_candidates_json": "[\"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"]",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, msg=response.text)
+        payload = response.json()
+        self.assertIsNone(payload.get("matched_bbox"))
+        self.assertEqual(payload.get("match_mode"), "none")
+        self.assertLess(float(payload.get("match_confidence") or 0.0), 0.55)
+
+    def test_pdf_page_render_uses_snippet_candidates(self):
+        path = os.path.join(self.data_dir, "tsla-ex103_462.htm.pdf")
+        with open(path, "rb") as f:
+            response = self.client.post(
+                "/render-pdf-page",
+                files={"file": ("tsla-ex103_462.htm.pdf", f, "application/pdf")},
+                data={
+                    "page": "1",
+                    "scale": "1.4",
+                    "snippet": "",
+                    "snippet_candidates_json": "[\"Exhibit 10.3\"]",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, msg=response.text)
+        payload = response.json()
+        self.assertIn(payload.get("match_mode"), {"exact", "fuzzy"})
+        self.assertIsNotNone(payload.get("used_snippet"))
 
 
 if __name__ == "__main__":

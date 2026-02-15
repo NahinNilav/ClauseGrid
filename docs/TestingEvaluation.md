@@ -31,6 +31,13 @@ Covers:
 - PDF conversion returns artifact with chunks, page-index metadata, page citations.
 - PDF render endpoint returns image payload and dimensions.
 
+### 2.3 Diff logic unit test
+File: `backend/tests/test_table_diff_logic.py`
+
+Covers:
+- Baseline-empty vs non-empty comparison should still mark `is_diff=true`.
+- Table-view cell diff payload includes `baseline_value`, `current_value`, and `compare_mode`.
+
 ## 3. Acceptance Criteria Mapping
 | Acceptance Area | Validation Method | Current Coverage |
 | --- | --- | --- |
@@ -108,6 +115,5 @@ Regression signals:
 | 8. Frontend UX | Manual tab-by-tab checklist and async task panel behavior |
 
 ## 8. Known Gaps and Residual Risk
-- Frontend currently has no dedicated project edit form; update is API-level.
 - Legacy frontend Gemini service remains in codebase and can confuse ownership if used accidentally.
 - Full end-to-end UI tests are not yet automated in this repo; current UI validation is manual.

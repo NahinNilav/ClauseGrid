@@ -20,6 +20,13 @@ cd backend
 Optional environment variables:
 - `LEGAL_REVIEW_DB` (SQLite path override)
 - `LEGAL_LLM_PROVIDER` (`openai` default, or `gemini`)
+- Parser stability:
+  - `LEGAL_PARSE_MAX_CONCURRENCY` (default `1`, minimum `1`)
+    - Global parse slot count used by upload parse tasks and `/convert`.
+  - `LEGAL_PDF_DOCLING_MODE` (`auto` default)
+    - `auto`: attempt Docling worker while healthy, auto-disable after fatal runtime signatures, continue with Pdfium fallback.
+    - `enabled`: always attempt Docling worker (still falls back if worker fails).
+    - `disabled`: skip Docling worker and use Pdfium fallback directly.
 - OpenAI (default provider):
   - `OPENAI_API_KEY`
   - `OPENAI_EXTRACTION_MODEL_FAST` (default `gpt-5-mini`)
@@ -56,6 +63,7 @@ Default frontend API target:
 7. Add optional annotations.
 8. Create ground truth and run evaluation.
 9. Review evaluation metrics and diagnostics.
+10. Export current table view as CSV when needed for external review packets.
 
 ## 4. Async Task Monitoring
 ### Task types
@@ -70,6 +78,11 @@ Default frontend API target:
 ### API checks
 - Single task: `GET /api/tasks/{task_id}`
 - Project tasks: `GET /api/projects/{project_id}/tasks`
+
+`PARSE_DOCUMENT` payload diagnostics may include:
+- `queue_wait_ms`
+- `pdf_docling_mode_effective`
+- `pdf_docling_disable_reason`
 
 ### Frontend behavior
 - Polls pending tasks every ~1.5 seconds.
@@ -124,6 +137,27 @@ Inspect fields:
 Use diagnostics endpoint for run-wide patterns:
 - `GET /api/projects/{project_id}/extraction-runs/{run_id}/diagnostics`
 
+### PDF highlight reliability policy
+- Precision-first policy for PDF visual anchors:
+  - do not render bbox when anchor confidence is weak.
+  - show cited page with warning metadata instead.
+- Runtime anchor thresholds:
+  - `match_confidence >= 0.55` required for drawing bbox.
+  - bbox area ratio must be within `[0.0001, 0.35]` of page area.
+- Coordinate normalization:
+  - bbox coordinates are canonicalized to `[x_min, y_min, x_max, y_max]` at parse/read time.
+- Highlight diagnostics available from `/render-pdf-page`:
+  - `match_mode`, `match_confidence`, `bbox_source`, `warning_code`.
+
+### Upload crash troubleshooting (macOS/pdfium native aborts)
+- If uploads crash with native errors (`Abort trap`, `Pure virtual function called`), verify:
+  - `LEGAL_PARSE_MAX_CONCURRENCY=1`
+  - `LEGAL_PDF_DOCLING_MODE=auto` (or `disabled` for maximum stability)
+- Confirm parse-task diagnostics in `GET /api/tasks/{task_id}`:
+  - high `queue_wait_ms` confirms queueing is active
+  - `pdf_docling_mode_effective=auto_disabled` indicates runtime circuit breaker engaged
+- Restart backend to reset process-local Docling auto-disable state.
+
 ## 8. Review and Audit Operations
 ### Review overlay policy
 - AI extraction rows remain immutable.
@@ -133,6 +167,7 @@ Use diagnostics endpoint for run-wide patterns:
 ### Annotation policy
 - Annotations are non-destructive.
 - Comments do not mutate extraction values.
+- Annotation lifecycle supports edit/approve/resolve/delete without touching extraction rows.
 
 ### Audit events
 - Critical lifecycle events are logged in `audit_events`.
@@ -147,12 +182,12 @@ Use diagnostics endpoint for run-wide patterns:
 
 ## 10. Frontend Workflow Operations
 Supported UX workflows:
-- Create/select/delete project.
+- Create/select/update/delete project.
 - Upload documents and track parse/extraction/evaluation background statuses.
 - Configure template fields and versioning.
 - Review table output, apply statuses, and manual updates.
 - Compare AI vs human via Evaluation tab metrics.
-- Add/list annotations.
+- Add/list/edit/approve/resolve/delete annotations.
 
 ## 11. Scope Coverage Checklist (All 8 Areas)
 | Scope Area | Runbook Guidance |

@@ -293,6 +293,199 @@ class LegalApiWorkflowTests(unittest.TestCase):
             "Stored source bytes should match uploaded PDF bytes",
         )
 
+    def test_template_create_and_version_auto_trigger_and_csv_export(self):
+        create_project = self.client.post(
+            "/api/projects",
+            json={"name": "Template Trigger Demo", "description": "Template trigger and export validation"},
+        )
+        self.assertEqual(create_project.status_code, 200, msg=create_project.text)
+        project_id = create_project.json()["project"]["id"]
+
+        upload = self.client.post(
+            f"/api/projects/{project_id}/documents",
+            files={"file": ("contract.txt", b"Effective date is January 1, 2025.", "text/plain")},
+        )
+        self.assertEqual(upload.status_code, 200, msg=upload.text)
+        parse_task = self._wait_for_task(upload.json()["task_id"])
+        self.assertEqual(parse_task["status"], "SUCCEEDED", msg=parse_task)
+
+        create_template = self.client.post(
+            f"/api/projects/{project_id}/templates",
+            json={
+                "name": "Trigger Template",
+                "fields": [
+                    {
+                        "key": "effective_date",
+                        "name": "Effective Date",
+                        "type": "date",
+                        "prompt": "Extract effective date.",
+                        "required": True,
+                    }
+                ],
+            },
+        )
+        self.assertEqual(create_template.status_code, 200, msg=create_template.text)
+        create_payload = create_template.json()
+        self.assertIn("triggered_extraction_task_id", create_payload)
+        create_trigger_task = self._wait_for_task(create_payload["triggered_extraction_task_id"])
+        self.assertIn(create_trigger_task["status"], {"SUCCEEDED", "FAILED", "CANCELED"})
+
+        template_id = create_payload["template"]["id"]
+        create_version = self.client.post(
+            f"/api/templates/{template_id}/versions",
+            json={
+                "fields": [
+                    {
+                        "key": "effective_date",
+                        "name": "Effective Date",
+                        "type": "date",
+                        "prompt": "Extract effective date.",
+                        "required": True,
+                    },
+                    {
+                        "key": "parties",
+                        "name": "Parties",
+                        "type": "text",
+                        "prompt": "Extract parties.",
+                        "required": False,
+                    },
+                ],
+            },
+        )
+        self.assertEqual(create_version.status_code, 200, msg=create_version.text)
+        version_payload = create_version.json()
+        self.assertIn("triggered_extraction_task_id", version_payload)
+        version_trigger_task = self._wait_for_task(version_payload["triggered_extraction_task_id"])
+        self.assertIn(version_trigger_task["status"], {"SUCCEEDED", "FAILED", "CANCELED"})
+
+        template_version_id = version_payload["template_version"]["id"]
+        table = self.client.get(f"/api/projects/{project_id}/table-view?template_version_id={template_version_id}")
+        self.assertEqual(table.status_code, 200, msg=table.text)
+        table_payload = table.json()
+        self.assertTrue(table_payload.get("extraction_run_id"))
+
+        export = self.client.get(
+            f"/api/projects/{project_id}/table-export.csv?template_version_id={template_version_id}&value_mode=effective"
+        )
+        self.assertEqual(export.status_code, 200, msg=export.text)
+        self.assertIn("text/csv", export.headers.get("content-type", ""))
+        content = export.text
+        self.assertIn("document_id,document_version_id,filename,field_key", content)
+        self.assertIn("effective_value", content)
+
+    def test_annotation_lifecycle_and_cross_project_validation(self):
+        create_a = self.client.post("/api/projects", json={"name": "Project A", "description": "A"})
+        create_b = self.client.post("/api/projects", json={"name": "Project B", "description": "B"})
+        self.assertEqual(create_a.status_code, 200, msg=create_a.text)
+        self.assertEqual(create_b.status_code, 200, msg=create_b.text)
+        project_a = create_a.json()["project"]["id"]
+        project_b = create_b.json()["project"]["id"]
+
+        template_a = self.client.post(
+            f"/api/projects/{project_a}/templates",
+            json={
+                "name": "Template A",
+                "fields": [{"key": "effective_date", "name": "Effective Date", "type": "date", "prompt": "Date"}],
+            },
+        )
+        template_b = self.client.post(
+            f"/api/projects/{project_b}/templates",
+            json={
+                "name": "Template B",
+                "fields": [{"key": "effective_date", "name": "Effective Date", "type": "date", "prompt": "Date"}],
+            },
+        )
+        self.assertEqual(template_a.status_code, 200, msg=template_a.text)
+        self.assertEqual(template_b.status_code, 200, msg=template_b.text)
+        template_version_a = template_a.json()["template_version"]["id"]
+        template_version_b = template_b.json()["template_version"]["id"]
+
+        upload_a = self.client.post(
+            f"/api/projects/{project_a}/documents",
+            files={"file": ("a.txt", b"Effective date January 2, 2025.", "text/plain")},
+        )
+        upload_b = self.client.post(
+            f"/api/projects/{project_b}/documents",
+            files={"file": ("b.txt", b"Effective date January 3, 2025.", "text/plain")},
+        )
+        self.assertEqual(upload_a.status_code, 200, msg=upload_a.text)
+        self.assertEqual(upload_b.status_code, 200, msg=upload_b.text)
+        self.assertEqual(self._wait_for_task(upload_a.json()["task_id"])["status"], "SUCCEEDED")
+        self.assertEqual(self._wait_for_task(upload_b.json()["task_id"])["status"], "SUCCEEDED")
+
+        table_a = self.client.get(f"/api/projects/{project_a}/table-view?template_version_id={template_version_a}")
+        self.assertEqual(table_a.status_code, 200, msg=table_a.text)
+        row_a = table_a.json()["rows"][0]
+        field_key = table_a.json()["columns"][0]["key"]
+        extraction_run_a = table_a.json()["extraction_run_id"]
+
+        table_b = self.client.get(f"/api/projects/{project_b}/table-view?template_version_id={template_version_b}")
+        self.assertEqual(table_b.status_code, 200, msg=table_b.text)
+        row_b = table_b.json()["rows"][0]
+
+        create_annotation = self.client.post(
+            f"/api/projects/{project_a}/annotations",
+            json={
+                "document_version_id": row_a["document_version_id"],
+                "template_version_id": template_version_a,
+                "field_key": field_key,
+                "body": "Needs legal sign-off",
+                "author": "qa@test.local",
+                "approved": False,
+                "resolved": False,
+            },
+        )
+        self.assertEqual(create_annotation.status_code, 200, msg=create_annotation.text)
+        annotation = create_annotation.json()["annotation"]
+        annotation_id = annotation["id"]
+
+        update_annotation = self.client.patch(
+            f"/api/projects/{project_a}/annotations/{annotation_id}",
+            json={"body": "Reviewed and approved", "approved": True, "resolved": True},
+        )
+        self.assertEqual(update_annotation.status_code, 200, msg=update_annotation.text)
+        updated = update_annotation.json()["annotation"]
+        self.assertEqual(updated["body"], "Reviewed and approved")
+        self.assertEqual(updated["approved"], 1)
+        self.assertEqual(updated["resolved"], 1)
+
+        delete_annotation = self.client.delete(f"/api/projects/{project_a}/annotations/{annotation_id}")
+        self.assertEqual(delete_annotation.status_code, 200, msg=delete_annotation.text)
+        self.assertTrue(delete_annotation.json()["deleted"])
+
+        bad_review = self.client.post(
+            f"/api/projects/{project_a}/review-decisions",
+            json={
+                "document_version_id": row_b["document_version_id"],
+                "template_version_id": template_version_a,
+                "field_key": field_key,
+                "status": "CONFIRMED",
+            },
+        )
+        self.assertEqual(bad_review.status_code, 400, msg=bad_review.text)
+
+        gt_b = self.client.post(
+            f"/api/projects/{project_b}/ground-truth-sets",
+            json={
+                "name": "GT B",
+                "labels": [
+                    {
+                        "document_version_id": row_b["document_version_id"],
+                        "field_key": field_key,
+                        "expected_value": "2025-01-03",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(gt_b.status_code, 200, msg=gt_b.text)
+        gt_b_id = gt_b.json()["ground_truth_set"]["id"]
+
+        bad_eval = self.client.post(
+            f"/api/projects/{project_a}/evaluation-runs",
+            json={"ground_truth_set_id": gt_b_id, "extraction_run_id": extraction_run_a},
+        )
+        self.assertEqual(bad_eval.status_code, 400, msg=bad_eval.text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -28,6 +28,7 @@ from mime_router import route_file
 from parsers.docx_docling import parse_docx_with_docling
 from parsers.html_docling import parse_html_with_docling
 from parsers.pdf_docling import parse_pdf
+from parsers.pdf_runtime import acquire_parse_slot, acquire_pdfium_lock
 from parsers.text_plain import parse_text
 
 app = FastAPI()
@@ -164,32 +165,35 @@ async def convert_document(request: Request, file: UploadFile = File(...)):
             )
 
         parser_result: Dict[str, Any]
+        queue_wait_ms = 0.0
+        with acquire_parse_slot() as waited_ms:
+            queue_wait_ms = round(waited_ms, 2)
 
-        if routed.format == "pdf":
-            suffix = routed.ext or ".pdf"
-            tmp_path = _write_temp_file(raw_bytes, suffix=suffix)
-            try:
-                parser_result = parse_pdf(pdf_path=tmp_path)
-            finally:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
+            if routed.format == "pdf":
+                suffix = routed.ext or ".pdf"
+                tmp_path = _write_temp_file(raw_bytes, suffix=suffix)
+                try:
+                    parser_result = parse_pdf(pdf_path=tmp_path)
+                finally:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
 
-        elif routed.format == "html":
-            parser_result = parse_html_with_docling(
-                converter=html_converter,
-                raw_bytes=raw_bytes,
-                filename=file.filename or "document.html",
-            )
+            elif routed.format == "html":
+                parser_result = parse_html_with_docling(
+                    converter=html_converter,
+                    raw_bytes=raw_bytes,
+                    filename=file.filename or "document.html",
+                )
 
-        elif routed.format == "docx":
-            parser_result = parse_docx_with_docling(
-                converter=docx_converter,
-                raw_bytes=raw_bytes,
-                filename=file.filename or "document.docx",
-            )
+            elif routed.format == "docx":
+                parser_result = parse_docx_with_docling(
+                    converter=docx_converter,
+                    raw_bytes=raw_bytes,
+                    filename=file.filename or "document.docx",
+                )
 
-        else:
-            parser_result = parse_text(raw_bytes)
+            else:
+                parser_result = parse_text(raw_bytes)
 
         blocks = parser_result["blocks"]
         chunks = chunk_blocks(blocks)
@@ -214,6 +218,9 @@ async def convert_document(request: Request, file: UploadFile = File(...)):
                 "dom_map_size": parser_result.get("dom_map_size"),
                 "worker_error": parser_result.get("worker_error"),
                 "page_index": parser_result.get("page_index", {}),
+                "pdf_docling_mode_effective": parser_result.get("pdf_docling_mode_effective"),
+                "pdf_docling_disable_reason": parser_result.get("pdf_docling_disable_reason"),
+                "queue_wait_ms": queue_wait_ms,
             },
         )
 
@@ -228,6 +235,9 @@ async def convert_document(request: Request, file: UploadFile = File(...)):
             chunk_count=len(artifact["chunks"]),
             citations_count=len(artifact["citation_index"]),
             parser=artifact["metadata"].get("parser"),
+            queue_wait_ms=queue_wait_ms,
+            pdf_docling_mode_effective=artifact["metadata"].get("pdf_docling_mode_effective"),
+            pdf_docling_disable_reason=artifact["metadata"].get("pdf_docling_disable_reason"),
             duration_ms=duration_ms,
         )
 
@@ -298,6 +308,23 @@ def _normalize_with_index_map(text: str) -> tuple[str, list[int]]:
     return "".join(normalized_chars), index_map
 
 
+def _normalize_bbox(raw_bbox: Any) -> Optional[list[float]]:
+    if not isinstance(raw_bbox, (list, tuple)) or len(raw_bbox) != 4:
+        return None
+    try:
+        x0, y0, x1, y1 = [float(value) for value in raw_bbox]
+    except (TypeError, ValueError):
+        return None
+
+    left = min(x0, x1)
+    right = max(x0, x1)
+    bottom = min(y0, y1)
+    top = max(y0, y1)
+    if right <= left or top <= bottom:
+        return None
+    return [left, bottom, right, top]
+
+
 def _snippet_candidates(snippet: str) -> list[str]:
     raw = re.sub(r"\s+", " ", snippet.strip())
     if not raw:
@@ -325,8 +352,27 @@ def _snippet_candidates(snippet: str) -> list[str]:
     return deduped
 
 
-def _char_span_for_snippet(text_page, snippet: str) -> Optional[tuple[int, int]]:
-    candidates = _snippet_candidates(snippet)
+def _token_overlap(left: str, right: str) -> float:
+    left_tokens = {
+        token
+        for token in re.findall(r"[a-z0-9]+", (left or "").lower())
+        if len(token) >= 2
+    }
+    right_tokens = {
+        token
+        for token in re.findall(r"[a-z0-9]+", (right or "").lower())
+        if len(token) >= 2
+    }
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / max(1, len(right_tokens))
+
+
+def _char_span_for_snippet(
+    text_page,
+    probe: str,
+) -> Optional[tuple[int, int, str, str]]:
+    candidates = _snippet_candidates(probe)
     if not candidates:
         return None
 
@@ -338,7 +384,7 @@ def _char_span_for_snippet(text_page, snippet: str) -> Optional[tuple[int, int]]
             if first:
                 start_char, count = first
                 if count > 0:
-                    return int(start_char), int(count)
+                    return int(start_char), int(count), "exact", candidate
         except Exception:
             continue
 
@@ -366,9 +412,41 @@ def _char_span_for_snippet(text_page, snippet: str) -> Optional[tuple[int, int]]
         start_orig = index_map[pos]
         end_orig = index_map[end_pos] + 1
         if end_orig > start_orig:
-            return start_orig, end_orig - start_orig
+            return start_orig, end_orig - start_orig, "fuzzy", candidate
 
     return None
+
+
+def _safe_text_range(text_page, start_char: int, count: int) -> str:
+    if count <= 0:
+        return ""
+    try:
+        return str(text_page.get_text_range(start_char, count) or "")
+    except Exception:
+        return ""
+
+
+def _parse_json_array_of_strings(raw_value: str) -> list[str]:
+    value = (raw_value or "").strip()
+    if not value:
+        return []
+    try:
+        payload = json.loads(value)
+    except Exception:
+        return []
+    if not isinstance(payload, list):
+        return []
+    output: list[str] = []
+    seen: set[str] = set()
+    for item in payload:
+        if not isinstance(item, str):
+            continue
+        normalized = re.sub(r"\s+", " ", item.strip())
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        output.append(normalized)
+    return output
 
 
 @app.post("/render-pdf-page")
@@ -378,6 +456,10 @@ async def render_pdf_page(
     page: int = Form(1),
     scale: float = Form(1.5),
     snippet: str = Form(""),
+    snippet_candidates_json: str = Form(""),
+    citation_start_char: int | None = Form(None),
+    citation_end_char: int | None = Form(None),
+    citation_bbox_json: str = Form(""),
 ):
     request_id = getattr(request.state, "request_id", None)
     start = time.perf_counter()
@@ -393,40 +475,114 @@ async def render_pdf_page(
 
     tmp_path = _write_temp_file(raw_bytes, suffix=".pdf")
     try:
-        pdf = pdfium.PdfDocument(tmp_path)
-        try:
-            page_count = len(pdf)
-            if page > page_count:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"page out of range: {page} > {page_count}",
-                )
-
-            page_obj = pdf[page - 1]
-            text_page = page_obj.get_textpage()
+        with acquire_pdfium_lock():
+            pdf = pdfium.PdfDocument(tmp_path)
             try:
-                width, height = page_obj.get_size()
+                page_count = len(pdf)
+                if page > page_count:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"page out of range: {page} > {page_count}",
+                    )
 
-                rendered = page_obj.render(scale=scale)
+                page_obj = pdf[page - 1]
+                text_page = page_obj.get_textpage()
                 try:
-                    pil_image = rendered.to_pil()
-                    buffer = BytesIO()
-                    pil_image.save(buffer, format="PNG")
-                    image_base64 = b64encode(buffer.getvalue()).decode("ascii")
-                finally:
-                    rendered.close()
+                    width, height = page_obj.get_size()
 
-                matched_bbox = None
-                snippet = (snippet or "").strip()
-                if snippet:
-                    char_span = _char_span_for_snippet(text_page, snippet)
-                    if char_span:
-                        matched_bbox = _bbox_from_char_range(text_page, char_span[0], char_span[1])
+                    rendered = page_obj.render(scale=scale)
+                    try:
+                        pil_image = rendered.to_pil()
+                        buffer = BytesIO()
+                        pil_image.save(buffer, format="PNG")
+                        image_base64 = b64encode(buffer.getvalue()).decode("ascii")
+                    finally:
+                        rendered.close()
+
+                    matched_bbox = None
+                    match_mode = "none"
+                    match_confidence = 0.0
+                    used_snippet = None
+                    bbox_source = "none"
+                    warning_code = None
+
+                    snippet = (snippet or "").strip()
+                    candidate_probes = []
+                    if snippet:
+                        candidate_probes.append(snippet)
+                    for candidate in _parse_json_array_of_strings(snippet_candidates_json):
+                        if candidate not in candidate_probes:
+                            candidate_probes.append(candidate)
+
+                    citation_bbox = None
+                    if citation_bbox_json:
+                        try:
+                            citation_bbox = _normalize_bbox(json.loads(citation_bbox_json))
+                        except Exception:
+                            citation_bbox = None
+
+                    # Prefer citation char-range anchors when plausible and supported by text overlap.
+                    if (
+                        citation_start_char is not None
+                        and citation_end_char is not None
+                        and citation_start_char >= 0
+                        and citation_end_char > citation_start_char
+                        and (citation_end_char - citation_start_char) <= 600
+                    ):
+                        count = citation_end_char - citation_start_char
+                        char_bbox = _bbox_from_char_range(text_page, citation_start_char, count)
+                        if char_bbox:
+                            char_text = _safe_text_range(text_page, citation_start_char, count)
+                            if candidate_probes:
+                                char_overlap = max(_token_overlap(char_text, probe) for probe in candidate_probes)
+                            else:
+                                char_overlap = 0.85
+                            if char_overlap >= 0.55:
+                                matched_bbox = char_bbox
+                                match_mode = "char_range"
+                                match_confidence = round(min(1.0, char_overlap), 4)
+                                bbox_source = "matched_snippet"
+                            else:
+                                warning_code = "char_range_low_overlap"
+
+                    if not matched_bbox and candidate_probes:
+                        best_rejected_overlap = 0.0
+                        for probe in candidate_probes:
+                            char_span = _char_span_for_snippet(text_page, probe)
+                            if not char_span:
+                                continue
+                            start_char, count, candidate_mode, resolved_candidate = char_span
+                            probe_bbox = _bbox_from_char_range(text_page, start_char, count)
+                            if not probe_bbox:
+                                continue
+                            matched_text = _safe_text_range(text_page, start_char, count)
+                            overlap = _token_overlap(matched_text, probe)
+                            if overlap < 0.55:
+                                best_rejected_overlap = max(best_rejected_overlap, overlap)
+                                continue
+
+                            matched_bbox = probe_bbox
+                            match_mode = candidate_mode
+                            match_confidence = round(min(1.0, overlap), 4)
+                            used_snippet = resolved_candidate
+                            bbox_source = "matched_snippet"
+                            break
+
+                        if not matched_bbox and best_rejected_overlap > 0:
+                            warning_code = "snippet_overlap_below_threshold"
+                            match_confidence = round(best_rejected_overlap, 4)
+
+                    if not matched_bbox and citation_bbox:
+                        matched_bbox = citation_bbox
+                        bbox_source = "citation_bbox"
+                        match_confidence = max(match_confidence, 0.35)
+                        if warning_code is None:
+                            warning_code = "fallback_citation_bbox"
+                finally:
+                    text_page.close()
+                    page_obj.close()
             finally:
-                text_page.close()
-                page_obj.close()
-        finally:
-            pdf.close()
+                pdf.close()
 
         duration_ms = round((time.perf_counter() - start) * 1000, 2)
         log_structured(
@@ -436,6 +592,10 @@ async def render_pdf_page(
             filename=file.filename,
             page=page,
             scale=scale,
+            match_mode=match_mode,
+            match_confidence=round(match_confidence, 4),
+            bbox_source=bbox_source,
+            warning_code=warning_code,
             duration_ms=duration_ms,
         )
 
@@ -448,6 +608,11 @@ async def render_pdf_page(
             "image_height": pil_image.height,
             "image_base64": image_base64,
             "matched_bbox": matched_bbox,
+            "match_mode": match_mode,
+            "match_confidence": round(match_confidence, 4),
+            "used_snippet": used_snippet,
+            "bbox_source": bbox_source,
+            "warning_code": warning_code,
         }
     finally:
         if os.path.exists(tmp_path):

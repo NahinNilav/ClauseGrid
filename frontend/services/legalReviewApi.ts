@@ -90,7 +90,7 @@ export const api = {
     }>(`/api/document-versions/${encodeURIComponent(documentVersionId)}/source`),
 
   createTemplate: (projectId: string, payload: { name: string; fields: any[]; validation_policy?: Record<string, unknown>; normalization_policy?: Record<string, unknown> }) =>
-    requestJson<{ template: any; template_version: TemplateVersion }>(
+    requestJson<{ template: any; template_version: TemplateVersion; triggered_extraction_task_id?: string }>(
       `/api/projects/${projectId}/templates`,
       {
         method: 'POST',
@@ -99,7 +99,7 @@ export const api = {
     ),
 
   createTemplateVersion: (templateId: string, payload: { fields: any[]; validation_policy?: Record<string, unknown>; normalization_policy?: Record<string, unknown> }) =>
-    requestJson<{ template_version: TemplateVersion }>(
+    requestJson<{ template_version: TemplateVersion; triggered_extraction_task_id?: string }>(
       `/api/templates/${templateId}/versions`,
       {
         method: 'POST',
@@ -137,6 +137,30 @@ export const api = {
     if (baselineDocumentId) params.set('baseline_document_id', baselineDocumentId);
     const qs = params.toString() ? `?${params.toString()}` : '';
     return requestJson<any>(`/api/projects/${projectId}/table-view${qs}`);
+  },
+
+  downloadTableExportCsv: async (
+    projectId: string,
+    templateVersionId?: string,
+    baselineDocumentId?: string,
+    valueMode: 'effective' | 'ai' = 'effective'
+  ) => {
+    const params = new URLSearchParams();
+    if (templateVersionId) params.set('template_version_id', templateVersionId);
+    if (baselineDocumentId) params.set('baseline_document_id', baselineDocumentId);
+    params.set('value_mode', valueMode);
+    const qs = `?${params.toString()}`;
+    const response = await fetch(`${API_URL}/api/projects/${projectId}/table-export.csv${qs}`, {
+      method: 'GET',
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(text || `CSV export failed (${response.status})`);
+    }
+    const blob = await response.blob();
+    const contentDisposition = response.headers.get('content-disposition') || '';
+    const match = /filename=\"?([^\";]+)\"?/.exec(contentDisposition);
+    return { blob, filename: match?.[1] || `project_${projectId}_table_export.csv` };
   },
 
   upsertReviewDecision: (
@@ -198,11 +222,32 @@ export const api = {
       body: string;
       author?: string;
       approved?: boolean;
+      resolved?: boolean;
     }
   ) =>
     requestJson<{ annotation: any }>(`/api/projects/${projectId}/annotations`, {
       method: 'POST',
       body: JSON.stringify(payload),
+    }),
+
+  updateAnnotation: (
+    projectId: string,
+    annotationId: string,
+    payload: {
+      body?: string;
+      author?: string;
+      approved?: boolean;
+      resolved?: boolean;
+    }
+  ) =>
+    requestJson<{ annotation: any }>(`/api/projects/${projectId}/annotations/${annotationId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }),
+
+  deleteAnnotation: (projectId: string, annotationId: string) =>
+    requestJson<{ annotation_id: string; deleted: boolean }>(`/api/projects/${projectId}/annotations/${annotationId}`, {
+      method: 'DELETE',
     }),
 
   listAnnotations: (projectId: string, templateVersionId?: string) => {

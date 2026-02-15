@@ -185,10 +185,17 @@ For each field:
   - `review_overlay`
   - `effective_value` (manual override when `MANUAL_UPDATED`)
   - `is_diff` (baseline comparison)
+  - `baseline_value`, `current_value`, `compare_mode`
+  - `annotation_count`
 
 Baseline logic:
 - Uses `baseline_document_id` if provided.
 - Otherwise defaults to the first document with a latest version.
+- Diff uses comparison mode priority per cell: `manual_value` -> `normalized_value` -> raw `value`.
+- Empty vs non-empty baseline changes are treated as diffs.
+
+CSV export endpoint:
+- `GET /api/projects/{project_id}/table-export.csv` mirrors table-view output and includes citations/confidence/review metadata for offline review.
 
 ### 8.8 Citation highlighting path (HTML/PDF/markdown fallback)
 Frontend converts a selected cell into viewer payload (`quote`, `page`, `citations`) and opens `DocumentViewer`.

@@ -51,6 +51,7 @@ class CitationPrioritizationTests(unittest.TestCase):
         details = LegalReviewService._prioritize_candidate_citations(
             selected_candidate=selected_candidate,
             retrieval_block_by_id=retrieval_block_by_id,
+            field_key="parties_entities",
             value='Tesla; Panasonic (as "Seller")',
             raw_text="The parties are Tesla, Inc. and Panasonic Corporation as Seller.",
         )
@@ -75,6 +76,7 @@ class CitationPrioritizationTests(unittest.TestCase):
         details = LegalReviewService._prioritize_candidate_citations(
             selected_candidate=selected_candidate,
             retrieval_block_by_id={},
+            field_key="document_title",
             value="Sample",
             raw_text="Sample",
         )
@@ -129,6 +131,7 @@ class CitationPrioritizationTests(unittest.TestCase):
         details = LegalReviewService._prioritize_candidate_citations(
             selected_candidate=selected_candidate,
             retrieval_block_by_id=retrieval_block_by_id,
+            field_key="effective_date_term",
             value="2017-08-17",
             raw_text="dated as of August 17, 2017",
         )
@@ -138,6 +141,46 @@ class CitationPrioritizationTests(unittest.TestCase):
         self.assertGreater(details["global_best_score"], details["segment_best_score"])
         self.assertEqual(details["citations"][0]["page"], 1)
         self.assertIn("August 17, 2017", details["citations"][0]["snippet"])
+
+    def test_early_page_bias_applies_for_header_fields_when_scores_are_close(self):
+        late_page = {
+            "source": "pdf",
+            "snippet": "Loan and Security Agreement title text with weak fit.",
+            "page": 168,
+            "doc_version_id": "dv_demo",
+        }
+        early_page = {
+            "source": "pdf",
+            "snippet": "AMENDED AND RESTATED LOAN AND SECURITY AGREEMENT",
+            "page": 1,
+            "doc_version_id": "dv_demo",
+        }
+        selected_candidate = {
+            "block_id": "segment_1_2",
+            "segment_block_ids": ["block_late", "block_early"],
+            "source_block_ids": [],
+            "citations": [late_page],
+        }
+        retrieval_block_by_id = {
+            "block_late": {
+                "text": "Loan and Security Agreement title text with weak fit and generic context.",
+                "citations": [late_page],
+            },
+            "block_early": {
+                "text": "AMENDED AND RESTATED LOAN AND SECURITY AGREEMENT",
+                "citations": [early_page],
+            },
+        }
+
+        details = LegalReviewService._prioritize_candidate_citations(
+            selected_candidate=selected_candidate,
+            retrieval_block_by_id=retrieval_block_by_id,
+            field_key="document_title",
+            value="Amended and Restated Loan and Security Agreement",
+            raw_text="Amended and Restated Loan and Security Agreement",
+        )
+
+        self.assertEqual(details["citations"][0]["page"], 1)
 
 
 if __name__ == "__main__":

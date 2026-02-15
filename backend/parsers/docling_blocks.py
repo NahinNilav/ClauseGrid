@@ -5,6 +5,23 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from artifact_schema import Block, Citation
 
 
+def _normalize_bbox_coords(coords: List[float]) -> Optional[List[float]]:
+    if len(coords) != 4:
+        return None
+    try:
+        x0, y0, x1, y1 = [float(value) for value in coords]
+    except (TypeError, ValueError):
+        return None
+
+    left = min(x0, x1)
+    right = max(x0, x1)
+    bottom = min(y0, y1)
+    top = max(y0, y1)
+    if right <= left or top <= bottom:
+        return None
+    return [left, bottom, right, top]
+
+
 def _parse_ref(ref_value: str) -> Optional[Tuple[str, int]]:
     if not isinstance(ref_value, str) or not ref_value.startswith("#/"):
         return None
@@ -20,27 +37,24 @@ def _extract_bbox(raw_bbox: Any) -> Optional[List[float]]:
         return None
 
     if isinstance(raw_bbox, (list, tuple)) and len(raw_bbox) == 4:
-        try:
-            return [float(raw_bbox[0]), float(raw_bbox[1]), float(raw_bbox[2]), float(raw_bbox[3])]
-        except (TypeError, ValueError):
-            return None
+        return _normalize_bbox_coords([raw_bbox[0], raw_bbox[1], raw_bbox[2], raw_bbox[3]])
 
     if isinstance(raw_bbox, dict):
         # Handle common bbox schema variants.
         if {"l", "t", "r", "b"}.issubset(raw_bbox.keys()):
-            return [
-                float(raw_bbox["l"]),
-                float(raw_bbox["t"]),
-                float(raw_bbox["r"]),
-                float(raw_bbox["b"]),
-            ]
+            return _normalize_bbox_coords([
+                raw_bbox["l"],
+                raw_bbox["t"],
+                raw_bbox["r"],
+                raw_bbox["b"],
+            ])
         if {"x0", "y0", "x1", "y1"}.issubset(raw_bbox.keys()):
-            return [
-                float(raw_bbox["x0"]),
-                float(raw_bbox["y0"]),
-                float(raw_bbox["x1"]),
-                float(raw_bbox["y1"]),
-            ]
+            return _normalize_bbox_coords([
+                raw_bbox["x0"],
+                raw_bbox["y0"],
+                raw_bbox["x1"],
+                raw_bbox["y1"],
+            ])
 
     return None
 
