@@ -729,14 +729,14 @@ const App: React.FC = () => {
       <aside className={`${sidebarCollapsed ? 'w-[72px]' : 'w-[320px]'} border-r border-[#E5E7EB] bg-white flex flex-col transition-all duration-200`}>
         <div className="p-3 border-b border-[#E5E7EB]">
           {!sidebarCollapsed ? (
-            <div className="flex items-start justify-between gap-2">
-              <div>
-                <h1 className="text-xl font-serif font-bold">Legal Tabular Review</h1>
-                <p className="text-xs text-[#8A8470] mt-1">Project lifecycle, extraction runs, review audit, evaluation.</p>
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex-1 pr-2">
+                <div className="text-[11px] font-bold tracking-[0.15em] text-[#2A2A2A] uppercase mb-1">Makebell</div>
+                <h1 className="text-2xl font-serif font-bold leading-tight">ClauseGrid</h1>
               </div>
               <button
                 onClick={() => setSidebarCollapsed(true)}
-                className="p-1.5 rounded-lg hover:bg-[#F5F4F0] text-[#8A8470] hover:text-[#6B6555] transition-colors"
+                className="p-1.5 rounded-lg hover:bg-[#F5F4F0] text-[#8A8470] hover:text-[#6B6555] transition-colors flex-shrink-0"
                 title="Collapse sidebar"
               >
                 <ChevronLeft className="w-4 h-4" />
