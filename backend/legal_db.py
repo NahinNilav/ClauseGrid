@@ -79,6 +79,16 @@ class SQLiteDB:
                     CREATE UNIQUE INDEX IF NOT EXISTS idx_document_versions_unique
                     ON document_versions(document_id, version_no);
 
+                    CREATE TABLE IF NOT EXISTS document_version_sources (
+                        document_version_id TEXT PRIMARY KEY,
+                        mime_type TEXT NOT NULL,
+                        filename TEXT NOT NULL,
+                        content_blob BLOB NOT NULL,
+                        size_bytes INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL,
+                        FOREIGN KEY(document_version_id) REFERENCES document_versions(id) ON DELETE CASCADE
+                    );
+
                     CREATE TABLE IF NOT EXISTS field_templates (
                         id TEXT PRIMARY KEY,
                         project_id TEXT NOT NULL,

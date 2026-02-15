@@ -21,6 +21,7 @@ Workflow API
 - `POST /api/projects/{project_id}/delete` (compatibility alias)
 - `POST /api/projects/{project_id}/documents`
 - `GET /api/projects/{project_id}/documents`
+- `GET /api/document-versions/{document_version_id}/source`
 - `POST /api/projects/{project_id}/templates`
 - `POST /api/templates/{template_id}/versions`
 - `GET /api/projects/{project_id}/templates`
@@ -49,6 +50,7 @@ Database
 - SQLite file path: `backend/legal_review.db` (override with `LEGAL_REVIEW_DB`)
 - Schema includes:
   - projects, documents, document_versions
+  - document_version_sources (persisted uploaded source bytes per document version)
   - field_templates, field_template_versions
   - extraction_runs, field_extractions
   - review_decisions, annotations

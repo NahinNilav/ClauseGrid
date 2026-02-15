@@ -106,7 +106,7 @@ const highlightRangeInElement = (
 export const HtmlCitationViewer: React.FC<HtmlCitationViewerProps> = ({ previewHtml, cell, primaryCitation: preferredCitation }) => {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const renderTokenRef = useRef(0);
-  const primaryCitation = preferredCitation || pickPrimaryCitation(cell?.citations);
+  const primaryCitation = preferredCitation || pickPrimaryCitation(cell?.citations, cell);
 
   const srcDoc = useMemo(() => sanitizeHtml(previewHtml), [previewHtml]);
 

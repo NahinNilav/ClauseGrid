@@ -14,11 +14,6 @@ export const decodeBase64Utf8 = (base64: string): string => {
   }
 };
 
-export const pickPrimaryCitation = (citations: SourceCitation[] | undefined): SourceCitation | null => {
-  if (!citations || !citations.length) return null;
-  return citations.find((c) => Boolean(c.snippet || c.selector || c.page || c.bbox)) || citations[0] || null;
-};
-
 const normalizeForMatch = (value: string): string =>
   value
     .toLowerCase()
@@ -37,6 +32,71 @@ const overlapScore = (left: string, right: string): number => {
   });
 
   return overlap / Math.max(leftTokens.size, rightTokens.size);
+};
+
+const scoreCitationAgainstCell = (
+  citation: SourceCitation,
+  cell?: ExtractionCell | null
+): number => {
+  if (!cell) return 0;
+
+  const quoteProbe = (cell.quote || '').trim();
+  const valueProbe = (cell.value || '').trim();
+  const reasoningProbe = (cell.reasoning || '').trim().slice(0, 280);
+  const snippet = (citation.snippet || '').trim();
+  const normSnippet = normalizeForMatch(snippet);
+  let score = 0;
+
+  if (snippet) {
+    if (quoteProbe) {
+      score += 2.4 * overlapScore(snippet, quoteProbe);
+      const normQuote = normalizeForMatch(quoteProbe);
+      if (normQuote && normQuote.length >= 8 && normSnippet.includes(normQuote)) {
+        score += 1.6;
+      }
+    }
+    if (valueProbe) {
+      score += 2.2 * overlapScore(snippet, valueProbe);
+      const normValue = normalizeForMatch(valueProbe);
+      if (normValue && normValue.length >= 6 && normSnippet.includes(normValue)) {
+        score += 1.4;
+      }
+    }
+    if (reasoningProbe) {
+      score += 0.8 * overlapScore(snippet, reasoningProbe);
+    }
+  }
+
+  if (citation.bbox?.length === 4) score += 0.25;
+  if (citation.selector) score += 0.2;
+  if (typeof cell.page === 'number' && citation.page === cell.page) score += 0.3;
+
+  return score;
+};
+
+export const pickPrimaryCitation = (
+  citations: SourceCitation[] | undefined,
+  cell?: ExtractionCell | null
+): SourceCitation | null => {
+  if (!citations || !citations.length) return null;
+  const viable = citations.filter((c) => Boolean(c.snippet || c.selector || c.page || c.bbox));
+  const pool = viable.length ? viable : citations;
+
+  if (!cell) {
+    return pool[0] || null;
+  }
+
+  let best = pool[0] || null;
+  let bestScore = -1;
+  pool.forEach((citation) => {
+    const score = scoreCitationAgainstCell(citation, cell);
+    if (score > bestScore) {
+      bestScore = score;
+      best = citation;
+    }
+  });
+
+  return best || pool[0] || null;
 };
 
 const scoreBlockAgainstCell = (block: ArtifactBlock, probes: string[], pageHint?: number): number => {
@@ -89,11 +149,11 @@ export const resolvePrimaryCitation = (
   document: DocumentFile,
   cell?: ExtractionCell | null
 ): SourceCitation | null => {
-  const direct = pickPrimaryCitation(cell?.citations);
+  const direct = pickPrimaryCitation(cell?.citations, cell);
   if (direct) return direct;
 
   const bestBlock = pickBestBlockForCell(document, cell);
-  return pickPrimaryCitation(bestBlock?.citations);
+  return pickPrimaryCitation(bestBlock?.citations, cell);
 };
 
 export const centerVerticalScroll = (

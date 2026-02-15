@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import os
+from base64 import b64decode
 import time
 import unittest
 
@@ -13,6 +16,7 @@ class LegalApiWorkflowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.client = TestClient(app)
+        cls.data_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data"))
 
     def _wait_for_task(self, task_id: str, timeout_seconds: float = 20.0):
         start = time.time()
@@ -246,6 +250,48 @@ class LegalApiWorkflowTests(unittest.TestCase):
         delete_response_compat = self.client.post(f"/api/projects/{project_id_2}/delete")
         self.assertEqual(delete_response_compat.status_code, 200, msg=delete_response_compat.text)
         self.assertTrue(delete_response_compat.json().get("deleted"))
+
+    def test_pdf_source_endpoint_returns_uploaded_pdf_bytes(self):
+        create_project = self.client.post(
+            "/api/projects",
+            json={"name": "PDF Source Demo", "description": "Source endpoint validation"},
+        )
+        self.assertEqual(create_project.status_code, 200, msg=create_project.text)
+        project_id = create_project.json()["project"]["id"]
+
+        pdf_filename = "tsla-ex103_198.htm.pdf"
+        pdf_path = os.path.join(self.data_dir, pdf_filename)
+        with open(pdf_path, "rb") as f:
+            original_bytes = f.read()
+            upload = self.client.post(
+                f"/api/projects/{project_id}/documents",
+                files={"file": (pdf_filename, original_bytes, "application/pdf")},
+            )
+        self.assertEqual(upload.status_code, 200, msg=upload.text)
+        parse_task = self._wait_for_task(upload.json()["task_id"], timeout_seconds=120.0)
+        self.assertEqual(parse_task["status"], "SUCCEEDED", msg=parse_task)
+
+        project_view = self.client.get(f"/api/projects/{project_id}")
+        self.assertEqual(project_view.status_code, 200, msg=project_view.text)
+        documents = project_view.json().get("documents") or []
+        latest = next((doc.get("latest_version") for doc in documents if doc.get("filename") == pdf_filename), None)
+        self.assertTrue(latest, "Expected latest version for uploaded PDF document")
+        self.assertTrue(latest.get("source_available"), "Expected source_available=true for uploaded PDF")
+
+        document_version_id = latest["id"]
+        source_response = self.client.get(f"/api/document-versions/{document_version_id}/source")
+        self.assertEqual(source_response.status_code, 200, msg=source_response.text)
+        source_payload = source_response.json()
+        self.assertEqual(source_payload.get("document_version_id"), document_version_id)
+        self.assertEqual(source_payload.get("mime_type"), "application/pdf")
+        self.assertEqual(source_payload.get("filename"), pdf_filename)
+
+        returned_bytes = b64decode(source_payload.get("content_base64") or "")
+        self.assertEqual(
+            hashlib.sha256(returned_bytes).hexdigest(),
+            hashlib.sha256(original_bytes).hexdigest(),
+            "Stored source bytes should match uploaded PDF bytes",
+        )
 
 
 if __name__ == "__main__":

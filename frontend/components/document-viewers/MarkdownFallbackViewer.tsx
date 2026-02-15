@@ -20,7 +20,15 @@ export const MarkdownFallbackViewer: React.FC<MarkdownFallbackViewerProps> = ({
   const renderTokenRef = useRef(0);
 
   const decodedContent = useMemo(() => decodeBase64Utf8(contentBase64), [contentBase64]);
-  const highlightTarget = (cell?.citations?.[0]?.snippet || cell?.quote || cell?.value || '').trim();
+  const citationSnippets = useMemo(
+    () =>
+      (cell?.citations || [])
+        .slice(0, 3)
+        .map((citation) => (citation?.snippet || '').trim())
+        .filter(Boolean),
+    [cell?.citations]
+  );
+  const highlightTarget = (cell?.quote || cell?.value || citationSnippets[0] || '').trim();
 
   const highlightedParts = useMemo(() => {
     if (!decodedContent || !highlightTarget) {
@@ -28,10 +36,11 @@ export const MarkdownFallbackViewer: React.FC<MarkdownFallbackViewerProps> = ({
     }
 
     const probes = [
+      cell?.quote?.trim() || '',
+      cell?.value?.trim() || '',
+      ...citationSnippets,
       highlightTarget,
       highlightTarget.replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ').trim(),
-      cell?.value?.trim() || '',
-      cell?.quote?.trim() || '',
     ].filter(Boolean);
 
     for (const probe of probes) {
@@ -43,7 +52,7 @@ export const MarkdownFallbackViewer: React.FC<MarkdownFallbackViewerProps> = ({
     }
 
     return { parts: [decodedContent], hasMatch: false, matcher: null as RegExp | null };
-  }, [decodedContent, highlightTarget, cell?.quote, cell?.value]);
+  }, [decodedContent, highlightTarget, citationSnippets, cell?.quote, cell?.value]);
 
   useEffect(() => {
     renderTokenRef.current += 1;
@@ -85,6 +94,9 @@ export const MarkdownFallbackViewer: React.FC<MarkdownFallbackViewerProps> = ({
             {fallbackReason}
           </div>
         )}
+        <div className="bg-[#FFF4D6] border border-[#E5E7EB] rounded-lg p-2 mb-4 text-xs text-[#7A5A00]">
+          Heuristic highlight mode: matching extracted text in converted preview.
+        </div>
         {!highlightedParts.hasMatch && highlightTarget && (
           <div className="bg-[#F5F4F0] border border-[#E5E7EB] rounded-lg p-2 mb-4 text-xs text-[#8A8470]">
             Exact citation match not found in preview text.

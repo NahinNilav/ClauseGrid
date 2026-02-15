@@ -43,10 +43,10 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({ document, cell }
       cell={cell}
       fallbackReason={
         format === 'pdf' && !document.sourceContentBase64
-          ? 'Original PDF bytes unavailable; using text preview fallback.'
+          ? 'Original PDF bytes unavailable; using heuristic text-preview highlighting.'
           : !primaryCitation
-            ? 'No citation anchor available; showing converted text.'
-            : 'Structured viewer unavailable for this format; using text preview fallback.'
+            ? 'No citation anchor available; using heuristic text-preview highlighting.'
+            : 'Structured viewer unavailable for this format; using heuristic text-preview highlighting.'
       }
     />
   );

@@ -80,6 +80,15 @@ export const api = {
   listProjectDocuments: (projectId: string) =>
     requestJson<{ documents: any[] }>(`/api/projects/${projectId}/documents`),
 
+  getDocumentVersionSource: (documentVersionId: string) =>
+    requestJson<{
+      document_version_id: string;
+      mime_type: string;
+      filename: string;
+      content_base64: string;
+      size_bytes: number;
+    }>(`/api/document-versions/${encodeURIComponent(documentVersionId)}/source`),
+
   createTemplate: (projectId: string, payload: { name: string; fields: any[]; validation_policy?: Record<string, unknown>; normalization_policy?: Record<string, unknown> }) =>
     requestJson<{ template: any; template_version: TemplateVersion }>(
       `/api/projects/${projectId}/templates`,

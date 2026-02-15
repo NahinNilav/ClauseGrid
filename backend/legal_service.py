@@ -741,12 +741,69 @@ class LegalReviewService:
             {"doc_version_id": doc_version_id},
         )
 
+    def store_document_version_source(
+        self,
+        *,
+        document_version_id: str,
+        mime_type: str,
+        filename: str,
+        content_bytes: bytes,
+    ) -> None:
+        if not document_version_id:
+            raise ValueError("document_version_id is required")
+        if not isinstance(content_bytes, (bytes, bytearray)) or not content_bytes:
+            raise ValueError("content_bytes must be non-empty bytes")
+
+        self.db.execute(
+            """
+            INSERT OR REPLACE INTO document_version_sources(
+                document_version_id, mime_type, filename, content_blob, size_bytes, created_at
+            )
+            VALUES(
+                :document_version_id, :mime_type, :filename, :content_blob, :size_bytes, :created_at
+            )
+            """,
+            {
+                "document_version_id": document_version_id,
+                "mime_type": str(mime_type or "application/octet-stream"),
+                "filename": str(filename or "document"),
+                "content_blob": bytes(content_bytes),
+                "size_bytes": len(content_bytes),
+                "created_at": utc_now_iso(),
+            },
+        )
+
+    def get_document_version_source(self, document_version_id: str) -> Optional[Dict[str, Any]]:
+        return self.db.fetch_one(
+            """
+            SELECT document_version_id, mime_type, filename, content_blob, size_bytes, created_at
+            FROM document_version_sources
+            WHERE document_version_id=:document_version_id
+            """,
+            {"document_version_id": document_version_id},
+        )
+
+    def has_document_version_source(self, document_version_id: str) -> bool:
+        if not document_version_id:
+            return False
+        row = self.db.fetch_one(
+            """
+            SELECT 1 AS source_available
+            FROM document_version_sources
+            WHERE document_version_id=:document_version_id
+            LIMIT 1
+            """,
+            {"document_version_id": document_version_id},
+        )
+        return bool(row and row.get("source_available"))
+
     def latest_document_versions_for_project(self, project_id: str) -> List[Dict[str, Any]]:
         rows = self.db.fetch_all(
             """
             SELECT d.id AS document_id, d.filename, d.source_mime_type, d.created_at AS document_created_at,
                    dv.id AS document_version_id, dv.version_no, dv.parse_status, dv.artifact_json,
-                   dv.error_message, dv.created_at AS version_created_at
+                   dv.error_message, dv.created_at AS version_created_at,
+                   CASE WHEN dvs.document_version_id IS NULL THEN 0 ELSE 1 END AS source_available
             FROM documents d
             LEFT JOIN document_versions dv
               ON dv.document_id = d.id
@@ -755,6 +812,8 @@ class LegalReviewService:
                 FROM document_versions dv2
                 WHERE dv2.document_id = d.id
              )
+            LEFT JOIN document_version_sources dvs
+              ON dvs.document_version_id = dv.id
             WHERE d.project_id=:project_id
             ORDER BY d.created_at ASC
             """,
@@ -775,6 +834,7 @@ class LegalReviewService:
                         "artifact": row.get("artifact_json") or {},
                         "error_message": row.get("error_message"),
                         "created_at": row.get("version_created_at"),
+                        "source_available": bool(row.get("source_available")),
                     }
                     if row.get("document_version_id")
                     else None,
@@ -1471,6 +1531,103 @@ class LegalReviewService:
         }
 
     @staticmethod
+    def _match_tokens(value: str) -> set[str]:
+        return {
+            token
+            for token in re.findall(r"[a-z0-9]+", _normalize_space(value).lower())
+            if len(token) >= 2
+        }
+
+    @classmethod
+    def _text_overlap_score(cls, left: str, right: str) -> float:
+        left_tokens = cls._match_tokens(left)
+        right_tokens = cls._match_tokens(right)
+        if not left_tokens or not right_tokens:
+            return 0.0
+        overlap = len(left_tokens & right_tokens)
+        return overlap / max(1, len(right_tokens))
+
+    @staticmethod
+    def _citation_key(citation: Dict[str, Any]) -> str:
+        return json.dumps(citation, sort_keys=True, default=str)
+
+    @classmethod
+    def _dedupe_citations(cls, citations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        output: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for citation in citations:
+            if not isinstance(citation, dict):
+                continue
+            key = cls._citation_key(citation)
+            if key in seen:
+                continue
+            seen.add(key)
+            output.append(citation)
+        return output
+
+    @classmethod
+    def _prioritize_candidate_citations(
+        cls,
+        *,
+        selected_candidate: Dict[str, Any],
+        retrieval_block_by_id: Dict[str, Dict[str, Any]],
+        value: str,
+        raw_text: str,
+    ) -> Tuple[List[Dict[str, Any]], Optional[str], float]:
+        candidate_citations = [
+            dict(citation)
+            for citation in (selected_candidate.get("citations") or [])
+            if isinstance(citation, dict)
+        ]
+        if not candidate_citations:
+            return [], None, 0.0
+
+        segment_block_ids = [str(item) for item in (selected_candidate.get("segment_block_ids") or []) if item]
+        source_block_ids = {str(item) for item in (selected_candidate.get("source_block_ids") or []) if item}
+        if not segment_block_ids:
+            return cls._dedupe_citations(candidate_citations), None, 0.0
+
+        normalized_value = _normalize_space(value).lower()
+        normalized_raw = _normalize_space(raw_text).lower()
+
+        best_block_id: Optional[str] = None
+        best_score = -1.0
+        primary_block_citations: List[Dict[str, Any]] = []
+        for block_id in segment_block_ids:
+            block = retrieval_block_by_id.get(block_id)
+            if not isinstance(block, dict):
+                continue
+            block_text = _normalize_space(str(block.get("text") or ""))
+            if not block_text:
+                continue
+
+            score = 0.0
+            score += 2.5 * cls._text_overlap_score(block_text, value)
+            score += 1.25 * cls._text_overlap_score(block_text, raw_text)
+            normalized_block = block_text.lower()
+            if normalized_value and len(normalized_value) >= 8 and normalized_value in normalized_block:
+                score += 1.5
+            if normalized_raw and len(normalized_raw) >= 12 and normalized_raw in normalized_block:
+                score += 1.0
+            if block_id in source_block_ids:
+                score += 0.35
+
+            if score > best_score:
+                best_score = score
+                best_block_id = block_id
+                primary_block_citations = [
+                    dict(citation)
+                    for citation in (block.get("citations") or [])
+                    if isinstance(citation, dict)
+                ]
+
+        if not primary_block_citations:
+            return cls._dedupe_citations(candidate_citations), best_block_id, max(0.0, best_score)
+
+        ordered = cls._dedupe_citations(primary_block_citations + candidate_citations)
+        return ordered, best_block_id, max(0.0, best_score)
+
+    @staticmethod
     def _compact_retrieval_context(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         compact: List[Dict[str, Any]] = []
         for candidate in candidates:
@@ -1672,6 +1829,11 @@ class LegalReviewService:
         candidate_top_k = segment_top_k if self.rse_enabled else block_top_k
         field_key = str(field.get("key") or field.get("id") or field.get("name") or "")
         blocks = self._build_retrieval_blocks(artifact, doc_version_id)
+        retrieval_block_by_id = {
+            str(block.get("block_id") or block.get("id") or ""): block
+            for block in blocks
+            if isinstance(block, dict)
+        }
         block_embeddings = self._get_or_create_block_embeddings(doc_version_id, blocks)
         initial_pool_k = self._rse_pool_size(profile) if self.rse_enabled else candidate_top_k
         ranked_candidates = retrieve_legal_candidates(
@@ -1819,6 +1981,19 @@ class LegalReviewService:
             if not value and raw_text:
                 value = _value_from_block(field, raw_text)
             normalized_value, valid = _normalize_value_by_type(str(field.get("type") or "text"), value)
+            ordered_citations, evidence_block_id, evidence_score = self._prioritize_candidate_citations(
+                selected_candidate=selected,
+                retrieval_block_by_id=retrieval_block_by_id,
+                value=value,
+                raw_text=raw_text,
+            )
+            evidence_page = None
+            if ordered_citations:
+                raw_page = ordered_citations[0].get("page")
+                try:
+                    evidence_page = int(raw_page)
+                except (TypeError, ValueError):
+                    evidence_page = None
 
             retrieval_score = float((selected.get("scores") or {}).get("final") or 0.0)
             base_confidence = float(primary.get("confidence") or 0.65)
@@ -1854,6 +2029,10 @@ class LegalReviewService:
                     selected_candidate_score=round(float((selected.get("scores") or {}).get("final") or 0.0), 4),
                     fallback_reason=fallback_reason,
                     self_consistent=self_consistent,
+                    evidence_block_id=evidence_block_id,
+                    evidence_block_score=round(float(evidence_score), 4),
+                    evidence_page=evidence_page,
+                    citation_count=len(ordered_citations),
                 )
 
             return {
@@ -1862,7 +2041,7 @@ class LegalReviewService:
                 "normalized_value": normalized_value,
                 "normalization_valid": bool(valid),
                 "confidence_score": confidence,
-                "citations": selected.get("citations") or [],
+                "citations": ordered_citations,
                 "evidence_summary": str(primary.get("evidence_summary") or "LLM extracted from retrieved legal evidence."),
                 "fallback_reason": fallback_reason,
                 "extraction_method": "llm_hybrid" if mode == "hybrid" else "llm_reasoning",
@@ -2182,6 +2361,7 @@ class LegalReviewService:
                     "filename": doc["filename"],
                     "artifact": latest.get("artifact") or {},
                     "parse_status": latest.get("parse_status"),
+                    "source_available": bool(latest.get("source_available")),
                     "cells": row_cells,
                 }
             )

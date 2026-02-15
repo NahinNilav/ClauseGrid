@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import tempfile
 import uuid
+from base64 import b64encode
 from typing import Any, Dict, List, Optional
 
 from docling.datamodel.base_models import InputFormat
@@ -194,10 +195,23 @@ def _run_parse_task(
             parse_status="COMPLETED",
             artifact=artifact,
         )
+        source_stored = False
+        if str(routed.get("format") or "") == "pdf":
+            try:
+                service.store_document_version_source(
+                    document_version_id=doc_version["id"],
+                    mime_type=str(routed.get("mime_type") or declared_mime_type or "application/pdf"),
+                    filename=filename,
+                    content_bytes=raw_bytes,
+                )
+                source_stored = True
+            except Exception:
+                source_stored = False
         payload: Dict[str, Any] = {
             "document_id": document_id,
             "document_version_id": doc_version["id"],
             "format": routed["format"],
+            "source_stored": source_stored,
         }
 
         active = service.active_template_for_project(project_id)
@@ -469,6 +483,35 @@ def list_documents(project_id: str):
     if not project:
         return _problem(404, "Project Not Found", "Project does not exist", instance=f"/api/projects/{project_id}/documents")
     return {"documents": service.latest_document_versions_for_project(project_id)}
+
+
+@router.get("/document-versions/{document_version_id}/source")
+def get_document_version_source(document_version_id: str):
+    source = service.get_document_version_source(document_version_id)
+    if not source:
+        return _problem(
+            404,
+            "Document Source Not Found",
+            "Original source bytes are not available for this document version.",
+            instance=f"/api/document-versions/{document_version_id}/source",
+        )
+
+    content_blob = source.get("content_blob")
+    if not isinstance(content_blob, (bytes, bytearray)) or not content_blob:
+        return _problem(
+            404,
+            "Document Source Not Found",
+            "Original source bytes are not available for this document version.",
+            instance=f"/api/document-versions/{document_version_id}/source",
+        )
+
+    return {
+        "document_version_id": source.get("document_version_id") or document_version_id,
+        "mime_type": source.get("mime_type") or "application/octet-stream",
+        "filename": source.get("filename") or "document",
+        "content_base64": b64encode(bytes(content_blob)).decode("ascii"),
+        "size_bytes": int(source.get("size_bytes") or len(content_blob)),
+    }
 
 
 @router.post("/projects/{project_id}/templates")

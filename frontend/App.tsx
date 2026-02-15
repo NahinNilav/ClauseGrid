@@ -69,6 +69,7 @@ interface TableRow {
   filename: string;
   artifact: any;
   parse_status: string;
+  source_available?: boolean;
   cells: Record<string, TableCell>;
 }
 
@@ -120,11 +121,13 @@ const toViewerDocument = (row: TableRow): DocumentFile => {
   const markdown = row.artifact?.markdown || '';
   return {
     id: row.document_id,
+    documentVersionId: row.document_version_id,
     name: row.filename,
     type: row.artifact?.mime_type || 'text/plain',
     size: markdown.length,
     content: toBase64(markdown),
     mimeType: 'text/markdown',
+    sourceAvailable: Boolean(row.source_available),
     artifact: row.artifact,
   };
 };
@@ -209,6 +212,10 @@ const App: React.FC = () => {
   const [reviewPanelWidth, setReviewPanelWidth] = useState<number>(380);
   const [viewerPanelWidth, setViewerPanelWidth] = useState<number>(480);
   const [viewerZoom, setViewerZoom] = useState<number>(100);
+  const [documentSourcesByVersion, setDocumentSourcesByVersion] = useState<
+    Record<string, { content_base64: string; mime_type: string; filename: string; size_bytes: number }>
+  >({});
+  const sourceLoadInFlightRef = useRef<Set<string>>(new Set());
   const isDraggingDivider = useRef<'review' | 'viewer' | null>(null);
   const dragStartX = useRef<number>(0);
   const dragStartWidth = useRef<number>(0);
@@ -349,8 +356,41 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (!selectedProjectId) return;
+    setDocumentSourcesByVersion({});
+    sourceLoadInFlightRef.current.clear();
     void refreshProjectContext(selectedProjectId, tab === 'table');
   }, [selectedProjectId]);
+
+  const selectedDocVersionId = selectedCell?.row.document_version_id || '';
+  const selectedDocFormat = String(selectedCell?.row.artifact?.format || '');
+  const selectedDocSourceAvailable = Boolean(selectedCell?.row.source_available);
+
+  useEffect(() => {
+    if (!selectedDocVersionId || selectedDocFormat !== 'pdf' || !selectedDocSourceAvailable) {
+      return;
+    }
+    if (documentSourcesByVersion[selectedDocVersionId]) {
+      return;
+    }
+    if (sourceLoadInFlightRef.current.has(selectedDocVersionId)) {
+      return;
+    }
+
+    sourceLoadInFlightRef.current.add(selectedDocVersionId);
+    void (async () => {
+      try {
+        const source = await api.getDocumentVersionSource(selectedDocVersionId);
+        setDocumentSourcesByVersion((prev) => ({
+          ...prev,
+          [selectedDocVersionId]: source,
+        }));
+      } catch {
+        // Keep markdown fallback path when source bytes are unavailable.
+      } finally {
+        sourceLoadInFlightRef.current.delete(selectedDocVersionId);
+      }
+    })();
+  }, [selectedDocVersionId, selectedDocFormat, selectedDocSourceAvailable, documentSourcesByVersion]);
 
   useEffect(() => {
     if (!uniquePendingTaskIds.length) return;
@@ -739,7 +779,18 @@ const App: React.FC = () => {
     }
   };
 
-  const selectedViewerDocument = selectedCell ? toViewerDocument(selectedCell.row) : null;
+  const selectedViewerDocument = useMemo(() => {
+    if (!selectedCell) return null;
+    const base = toViewerDocument(selectedCell.row);
+    const docVersionId = base.documentVersionId || '';
+    const source = docVersionId ? documentSourcesByVersion[docVersionId] : undefined;
+    if (!source) return base;
+    return {
+      ...base,
+      sourceContentBase64: source.content_base64,
+      sourceMimeType: source.mime_type,
+    };
+  }, [selectedCell, documentSourcesByVersion]);
   const selectedViewerCell = selectedCell ? toLegacyCell(selectedCell.cell) : null;
 
   return (

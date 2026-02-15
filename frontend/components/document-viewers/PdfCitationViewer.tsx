@@ -79,7 +79,7 @@ export const PdfCitationViewer: React.FC<PdfCitationViewerProps> = ({
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const renderTokenRef = useRef(0);
 
-  const primaryCitation = preferredCitation || pickPrimaryCitation(cell?.citations);
+  const primaryCitation = preferredCitation || pickPrimaryCitation(cell?.citations, cell);
   const [page, setPage] = useState<number>(primaryCitation?.page || cell?.page || 1);
   const [renderedPage, setRenderedPage] = useState<RenderedPdfPage | null>(null);
   const [loading, setLoading] = useState(false);
@@ -97,6 +97,15 @@ export const PdfCitationViewer: React.FC<PdfCitationViewerProps> = ({
     }
     return null;
   }, [primaryCitation?.bbox, renderedPage?.matched_bbox]);
+
+  const snippetProbe = useMemo(() => {
+    const probes = [
+      (cell?.quote || '').trim(),
+      (cell?.value || '').trim(),
+      (primaryCitation?.snippet || '').trim(),
+    ].filter(Boolean);
+    return probes[0] || '';
+  }, [cell?.quote, cell?.value, primaryCitation?.snippet]);
 
   useEffect(() => {
     setPage(primaryCitation?.page || cell?.page || 1);
@@ -116,7 +125,7 @@ export const PdfCitationViewer: React.FC<PdfCitationViewerProps> = ({
         formData.append('file', blob, filename || 'document.pdf');
         formData.append('page', String(page));
         formData.append('scale', '1.8');
-        formData.append('snippet', primaryCitation?.snippet || cell?.quote || cell?.value || '');
+        formData.append('snippet', snippetProbe);
 
         const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
         const response = await fetch(`${apiUrl}/render-pdf-page`, {
@@ -173,7 +182,7 @@ export const PdfCitationViewer: React.FC<PdfCitationViewerProps> = ({
     }, 120);
 
     return () => clearTimeout(timer);
-  }, [sourceContentBase64, sourceMimeType, filename, page, primaryCitation?.snippet, cell?.quote, cell?.value]);
+  }, [sourceContentBase64, sourceMimeType, filename, page, snippetProbe]);
 
   useEffect(() => {
     if (!scrollContainerRef.current || !renderedPage) {
@@ -263,6 +272,11 @@ export const PdfCitationViewer: React.FC<PdfCitationViewerProps> = ({
 
         {!loading && renderedPage && (
           <div className="relative bg-white rounded-xl shadow-card p-4 inline-block">
+            <div className="mb-2 text-xs text-[#6B6555]">
+              {isUsableBbox(effectiveBBox)
+                ? 'Anchored citation mode: highlighting matched evidence span.'
+                : 'Heuristic mode: showing cited page without precise bbox anchor.'}
+            </div>
             <img
               src={`data:image/png;base64,${renderedPage.image_base64}`}
               alt={`PDF page ${renderedPage.page}`}

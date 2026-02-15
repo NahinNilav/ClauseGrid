@@ -1,5 +1,6 @@
 export interface DocumentFile {
   id: string;
+  documentVersionId?: string;
   name: string;
   type: string;
   size: number;
@@ -7,6 +8,7 @@ export interface DocumentFile {
   mimeType: string;
   sourceContentBase64?: string;
   sourceMimeType?: string;
+  sourceAvailable?: boolean;
   artifact?: ParsedArtifact;
 }
 

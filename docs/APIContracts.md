@@ -23,6 +23,7 @@
 | `POST /api/projects/{project_id}/delete` | Sync | same as delete | Compatibility alias |
 | `POST /api/projects/{project_id}/documents` | Async | `documents`, `request_tasks` | Creates parse task; parse task creates `document_versions`; may trigger extraction task/run |
 | `GET /api/projects/{project_id}/documents` | Sync | `documents`, `document_versions` | Latest document versions |
+| `GET /api/document-versions/{document_version_id}/source` | Sync | `document_version_sources` | Returns persisted original source bytes as base64 when available |
 | `POST /api/projects/{project_id}/templates` | Mixed | `field_templates`, `field_template_versions`; optional `extraction_runs`, `request_tasks` | Creates template + v1; triggers extraction when parsed docs exist |
 | `POST /api/templates/{template_id}/versions` | Async | `field_template_versions`, `field_templates`, `extraction_runs`, `request_tasks` | Creates new version and triggers extraction |
 | `GET /api/projects/{project_id}/templates` | Sync | `field_templates`, `field_template_versions` | Lists templates with versions |
@@ -153,6 +154,9 @@ Response structure:
   - `review_overlay`
   - `effective_value`
   - `is_diff`
+ - each row also includes:
+   - `document_version_id`
+   - `source_available` (whether original source bytes can be fetched for structured viewers)
 
 ### 3.6 Review Decision Contract
 `POST /api/projects/{project_id}/review-decisions`
