@@ -12,7 +12,7 @@ import {
   TemplateFieldDefinition,
 } from './types';
 import { DocumentViewer } from './components/document-viewers';
-import { Trash2, FolderOpen, ChevronRight, ChevronLeft, X, GripVertical, ZoomIn, ZoomOut, Maximize2, ChevronUp, ChevronDown, FileText } from './components/Icons';
+import { Trash2, FolderOpen, ChevronRight, ChevronLeft, X, GripVertical, ZoomIn, ZoomOut, Maximize2, ChevronUp, ChevronDown, FileText, HelpCircle } from './components/Icons';
 
 const REVIEW_STATUSES: ReviewStatus[] = [
   'CONFIRMED',
@@ -27,6 +27,27 @@ type QualityProfile = 'high' | 'balanced' | 'fast';
 
 const EXTRACTION_MODES: ExtractionMode[] = ['hybrid', 'deterministic', 'llm_reasoning'];
 const QUALITY_PROFILES: QualityProfile[] = ['high', 'balanced', 'fast'];
+
+interface TagLegendItem {
+  label: string;
+  className: string;
+  description: string;
+}
+
+const TAG_LEGEND_ITEMS: TagLegendItem[] = [
+  { label: 'CONFIRMED', className: 'bg-[#F5F4F0] text-[#6B6555]', description: 'Reviewer accepted value' },
+  { label: 'REJECTED', className: 'bg-[#F5F4F0] text-[#6B6555]', description: 'Reviewer rejected value' },
+  { label: 'MANUAL_UPDATED', className: 'bg-[#F5F4F0] text-[#6B6555]', description: 'Reviewer replaced value' },
+  { label: 'MISSING_DATA', className: 'bg-[#F5F4F0] text-[#6B6555]', description: 'Reviewer marked unavailable' },
+  { label: 'llm_hybrid', className: 'bg-[#E8EEF8] text-[#304A7A]', description: 'Hybrid retrieval + LLM' },
+  { label: 'llm_reasoning', className: 'bg-[#E8EEF8] text-[#304A7A]', description: 'LLM reasoning mode' },
+  { label: 'deterministic', className: 'bg-[#E8EEF8] text-[#304A7A]', description: 'Rule-based extraction' },
+  { label: 'PASS', className: 'bg-[#E4F8EC] text-[#1C6A3F]', description: 'Verifier agrees with evidence' },
+  { label: 'PARTIAL', className: 'bg-[#FFF4D6] text-[#7A5A00]', description: 'Verifier sees partial support' },
+  { label: 'FAIL', className: 'bg-[#FBE4E6] text-[#8D1D2C]', description: 'Verifier found mismatch' },
+  { label: 'LOW CONF', className: 'bg-[#FFF4D6] text-[#7A5A00]', description: 'Confidence under threshold' },
+  { label: 'DIFF', className: 'bg-[#FFF4D6] text-[#7A5A00]', description: 'Differs from baseline doc' },
+];
 
 interface TableCell {
   field_key: string;
@@ -183,6 +204,7 @@ const App: React.FC = () => {
   const [qualityProfile, setQualityProfile] = useState<QualityProfile>('fast');
   const [showUnresolvedOnly, setShowUnresolvedOnly] = useState<boolean>(false);
   const [showLowConfidenceOnly, setShowLowConfidenceOnly] = useState<boolean>(false);
+  const [showTagLegend, setShowTagLegend] = useState<boolean>(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
   const [reviewPanelWidth, setReviewPanelWidth] = useState<number>(380);
   const [viewerPanelWidth, setViewerPanelWidth] = useState<number>(480);
@@ -498,9 +520,6 @@ const App: React.FC = () => {
         },
       };
       const data = await api.createTemplate(selectedProjectId, payload);
-      if (data.triggered_extraction_task_id) {
-        addPendingTaskIds([data.triggered_extraction_task_id]);
-      }
       await refreshProjectContext(selectedProjectId, true);
       setSelectedTemplateId(data.template.id);
       setSelectedTemplateVersionId(data.template_version.id);
@@ -526,7 +545,6 @@ const App: React.FC = () => {
           boolean_policy: 'strict_true_false',
         },
       });
-      addPendingTaskIds([data.triggered_extraction_task_id]);
       setSelectedTemplateVersionId(data.template_version.id);
       await refreshProjectContext(selectedProjectId, true);
       setTab('table');
@@ -1191,7 +1209,34 @@ const App: React.FC = () => {
                             ))}
                           </select>
                         </div>
+
+                        {/* Separator */}
+                        <div className="w-px h-7 bg-[#E5E7EB] flex-shrink-0" />
+
+                        {/* Tag Legend */}
+                        <button
+                          onClick={() => setShowTagLegend((prev) => !prev)}
+                          className="px-2.5 py-1.5 rounded-lg bg-white border border-[#E5E7EB] text-[11px] font-semibold text-[#6B6555] hover:bg-[#F5F4F0] transition-colors inline-flex items-center gap-1.5 flex-shrink-0"
+                          title={showTagLegend ? 'Hide tag legend' : 'Show tag legend'}
+                        >
+                          <HelpCircle className="w-3 h-3" />
+                          {showTagLegend ? 'Hide Tags' : 'Tag Legend'}
+                        </button>
                       </div>
+                      {showTagLegend && (
+                        <div className="px-4 pb-2 pt-1 border-t border-[#F0F0EC] bg-[#FAFAF7]">
+                          <div className="rounded-lg border border-[#E5E7EB] bg-white/90 px-2.5 py-2">
+                            <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-x-4 gap-y-1.5">
+                              {TAG_LEGEND_ITEMS.map((item) => (
+                                <div key={item.label} className="grid grid-cols-[110px,1fr] items-center gap-x-2 min-w-0">
+                                  <span className={`px-1.5 py-0.5 rounded text-[10px] w-fit ${item.className}`}>{item.label}</span>
+                                  <span className="text-[10px] text-[#8A8470] leading-4">{item.description}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
 
                     {/* Table */}

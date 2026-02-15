@@ -472,7 +472,7 @@ def list_documents(project_id: str):
 
 
 @router.post("/projects/{project_id}/templates")
-def create_template(project_id: str, payload: CreateTemplateRequest, background_tasks: BackgroundTasks):
+def create_template(project_id: str, payload: CreateTemplateRequest):
     if not service.get_project(project_id):
         return _problem(404, "Project Not Found", "Project does not exist", instance=f"/api/projects/{project_id}/templates")
 
@@ -487,28 +487,11 @@ def create_template(project_id: str, payload: CreateTemplateRequest, background_
     except ValueError as exc:
         return _problem(400, "Template Creation Failed", str(exc), instance=f"/api/projects/{project_id}/templates")
 
-    extraction_task_id = None
-    docs = service.latest_document_versions_for_project(project_id)
-    if any(doc.get("latest_version") for doc in docs):
-        run = service.create_extraction_run(
-            project_id=project_id,
-            template_version_id=version["id"],
-            trigger_reason="TEMPLATE_CREATED",
-        )
-        extraction_task = service.create_task(
-            task_type="EXTRACTION_RUN",
-            project_id=project_id,
-            entity_id=run["id"],
-            payload={"run_id": run["id"]},
-        )
-        extraction_task_id = extraction_task["id"]
-        background_tasks.add_task(_run_extraction_task, extraction_task["id"], run["id"])
-
-    return {"template": template, "template_version": version, "triggered_extraction_task_id": extraction_task_id}
+    return {"template": template, "template_version": version}
 
 
 @router.post("/templates/{template_id}/versions")
-def create_template_version(template_id: str, payload: CreateTemplateVersionRequest, background_tasks: BackgroundTasks):
+def create_template_version(template_id: str, payload: CreateTemplateVersionRequest):
     template = service.get_template(template_id)
     if not template:
         return _problem(404, "Template Not Found", "Template does not exist", instance=f"/api/templates/{template_id}/versions")
@@ -522,20 +505,7 @@ def create_template_version(template_id: str, payload: CreateTemplateVersionRequ
     except ValueError as exc:
         return _problem(400, "Template Version Failed", str(exc), instance=f"/api/templates/{template_id}/versions")
 
-    run = service.create_extraction_run(
-        project_id=template["project_id"],
-        template_version_id=version["id"],
-        trigger_reason="TEMPLATE_VERSION_UPDATED",
-    )
-    extraction_task = service.create_task(
-        task_type="EXTRACTION_RUN",
-        project_id=template["project_id"],
-        entity_id=run["id"],
-        payload={"run_id": run["id"]},
-    )
-    background_tasks.add_task(_run_extraction_task, extraction_task["id"], run["id"])
-
-    return {"template_version": version, "triggered_extraction_task_id": extraction_task["id"]}
+    return {"template_version": version}
 
 
 @router.get("/projects/{project_id}/templates")

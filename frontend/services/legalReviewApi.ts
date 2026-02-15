@@ -81,7 +81,7 @@ export const api = {
     requestJson<{ documents: any[] }>(`/api/projects/${projectId}/documents`),
 
   createTemplate: (projectId: string, payload: { name: string; fields: any[]; validation_policy?: Record<string, unknown>; normalization_policy?: Record<string, unknown> }) =>
-    requestJson<{ template: any; template_version: TemplateVersion; triggered_extraction_task_id?: string | null }>(
+    requestJson<{ template: any; template_version: TemplateVersion }>(
       `/api/projects/${projectId}/templates`,
       {
         method: 'POST',
@@ -90,7 +90,7 @@ export const api = {
     ),
 
   createTemplateVersion: (templateId: string, payload: { fields: any[]; validation_policy?: Record<string, unknown>; normalization_policy?: Record<string, unknown> }) =>
-    requestJson<{ template_version: TemplateVersion; triggered_extraction_task_id: string }>(
+    requestJson<{ template_version: TemplateVersion }>(
       `/api/templates/${templateId}/versions`,
       {
         method: 'POST',
