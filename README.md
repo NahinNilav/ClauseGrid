@@ -3,7 +3,9 @@
 Full-stack take-home implementation for legal document ingestion, extraction, tabular comparison, human review, and evaluation against ground truth.
 
 ## Demo Video
-- Add demo video link here: `[TODO: paste demo video URL]`
+
+https://github.com/user-attachments/assets/79a066d4-c834-4e00-a19f-53f32b49cb3a
+
 
 ## Evaluator Quick Start
 1. Read the submission-critical docs in the order listed under **Documentation Reading Order**.
