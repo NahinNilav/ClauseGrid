@@ -1395,19 +1395,18 @@ const App: React.FC = () => {
                   <div className="flex-1 min-w-0 flex flex-col bg-white border border-[#E5E7EB] rounded-xl overflow-hidden">
                     {/* Toolbar */}
                     <div className="border-b border-[#E5E7EB] bg-[#FAFAF7]">
-                      <div className="flex items-center justify-between px-4 py-2.5 gap-3">
-                        {/* Actions */}
-                        <div className="flex items-center gap-2 flex-shrink-0">
-                          <button onClick={runExtraction} className="px-4 py-2 rounded-lg bg-[#1C1C1C] text-white text-xs font-semibold hover:bg-[#333] transition-colors">
+                      <div className="px-4 py-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button onClick={runExtraction} className="px-3.5 py-1.5 rounded-lg bg-[#1C1C1C] text-white text-xs font-semibold hover:bg-[#333] transition-colors">
                             Run Extraction
                           </button>
-                          <button onClick={refreshTable} className="px-4 py-2 rounded-lg bg-white border border-[#E5E7EB] text-xs font-semibold text-[#1C1C1C] hover:bg-[#F5F4F0] transition-colors">
+                          <button onClick={refreshTable} className="px-3.5 py-1.5 rounded-lg bg-white border border-[#E5E7EB] text-xs font-semibold text-[#1C1C1C] hover:bg-[#F5F4F0] transition-colors">
                             Refresh Table
                           </button>
                           <select
                             value={exportValueMode}
                             onChange={(e) => setExportValueMode(e.target.value as 'effective' | 'ai')}
-                            className="border border-[#E5E7EB] rounded-lg px-2 py-2 text-xs bg-white"
+                            className="border border-[#E5E7EB] rounded-lg px-2.5 py-1.5 text-xs bg-white min-w-[145px]"
                             title="CSV value mode"
                           >
                             <option value="effective">Export Effective</option>
@@ -1415,23 +1414,19 @@ const App: React.FC = () => {
                           </select>
                           <button
                             onClick={exportTableCsv}
-                            className="px-4 py-2 rounded-lg bg-white border border-[#E5E7EB] text-xs font-semibold text-[#1C1C1C] hover:bg-[#F5F4F0] transition-colors"
+                            className="px-3.5 py-1.5 rounded-lg bg-white border border-[#E5E7EB] text-xs font-semibold text-[#1C1C1C] hover:bg-[#F5F4F0] transition-colors"
                           >
                             Export CSV
                           </button>
-                        </div>
 
-                        {/* Separator */}
-                        <div className="w-px h-7 bg-[#E5E7EB] flex-shrink-0" />
+                          <div className="hidden lg:block w-px h-6 bg-[#E5E7EB] mx-0.5" />
 
-                        {/* Configuration */}
-                        <div className="flex items-center gap-4 flex-shrink-0">
                           <div className="flex items-center gap-1.5">
                             <span className="text-[10px] font-semibold text-[#8A8470] uppercase tracking-wider">Mode</span>
                             <select
                               value={extractionMode}
                               onChange={(e) => setExtractionMode(e.target.value as ExtractionMode)}
-                              className="border border-[#E5E7EB] rounded-lg px-2.5 py-1.5 text-xs text-[#1C1C1C] bg-white focus:ring-1 focus:ring-[#4A5A7B] focus:border-[#4A5A7B] outline-none"
+                              className="border border-[#E5E7EB] rounded-lg px-2.5 py-1.5 text-xs text-[#1C1C1C] bg-white focus:ring-1 focus:ring-[#4A5A7B] focus:border-[#4A5A7B] outline-none min-w-[120px]"
                             >
                               {EXTRACTION_MODES.map((mode) => (
                                 <option key={mode} value={mode}>{mode}</option>
@@ -1443,21 +1438,16 @@ const App: React.FC = () => {
                             <select
                               value={qualityProfile}
                               onChange={(e) => setQualityProfile(e.target.value as QualityProfile)}
-                              className="border border-[#E5E7EB] rounded-lg px-2.5 py-1.5 text-xs text-[#1C1C1C] bg-white focus:ring-1 focus:ring-[#4A5A7B] focus:border-[#4A5A7B] outline-none"
+                              className="border border-[#E5E7EB] rounded-lg px-2.5 py-1.5 text-xs text-[#1C1C1C] bg-white focus:ring-1 focus:ring-[#4A5A7B] focus:border-[#4A5A7B] outline-none min-w-[100px]"
                             >
                               {QUALITY_PROFILES.map((profile) => (
                                 <option key={profile} value={profile}>{profile}</option>
                               ))}
                             </select>
                           </div>
-                        </div>
 
-                        {/* Separator */}
-                        <div className="w-px h-7 bg-[#E5E7EB] flex-shrink-0" />
+                          <div className="hidden lg:block w-px h-6 bg-[#E5E7EB] mx-0.5" />
 
-                        {/* Filters */}
-                        <div className="flex items-center gap-2 flex-shrink-0">
-                          <span className="text-[10px] font-semibold text-[#8A8470] uppercase tracking-wider hidden lg:inline">Filters</span>
                           <button
                             onClick={() => setShowUnresolvedOnly((prev) => !prev)}
                             className={`px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-colors ${showUnresolvedOnly ? 'bg-[#FBE7D8] text-[#8A3B00] ring-1 ring-[#F0C9A8]' : 'bg-white border border-[#E5E7EB] text-[#6B6555] hover:bg-[#F5F4F0]'}`}
@@ -1470,38 +1460,35 @@ const App: React.FC = () => {
                           >
                             Low Confidence
                           </button>
-                        </div>
 
-                        {/* Separator */}
-                        <div className="w-px h-7 bg-[#E5E7EB] flex-shrink-0" />
+                          <div className="hidden lg:block w-px h-6 bg-[#E5E7EB] mx-0.5" />
 
-                        {/* Baseline */}
-                        <div className="flex items-center gap-1.5 flex-shrink-0">
-                          <span className="text-[10px] font-semibold text-[#8A8470] uppercase tracking-wider">Baseline</span>
-                          <select
-                            value={baselineDocumentId}
-                            onChange={(e) => setBaselineDocumentId(e.target.value)}
-                            className="border border-[#E5E7EB] rounded-lg px-2.5 py-1.5 text-xs bg-white focus:ring-1 focus:ring-[#4A5A7B] focus:border-[#4A5A7B] outline-none max-w-[180px]"
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-[10px] font-semibold text-[#8A8470] uppercase tracking-wider">Baseline</span>
+                            <select
+                              value={baselineDocumentId}
+                              onChange={(e) => setBaselineDocumentId(e.target.value)}
+                              className="border border-[#E5E7EB] rounded-lg px-2.5 py-1.5 text-xs bg-white focus:ring-1 focus:ring-[#4A5A7B] focus:border-[#4A5A7B] outline-none min-w-[165px] max-w-[220px]"
+                            >
+                              <option value="">Auto</option>
+                              {(tableView?.rows || []).map((row) => (
+                                <option key={row.document_id} value={row.document_id}>{row.filename}</option>
+                              ))}
+                            </select>
+                          </div>
+                          <button
+                            onClick={() => setShowTagLegend((prev) => !prev)}
+                            className={`px-2.5 py-1.5 rounded-lg border text-[11px] font-semibold transition-colors inline-flex items-center gap-1.5 ${
+                              showTagLegend
+                                ? 'bg-[#EFF1F5] border-[#CED4E0] text-[#304A7A]'
+                                : 'bg-white border-[#E5E7EB] text-[#6B6555] hover:bg-[#F5F4F0]'
+                            }`}
+                            title={showTagLegend ? 'Hide tag legend' : 'Show tag legend'}
                           >
-                            <option value="">Auto</option>
-                            {(tableView?.rows || []).map((row) => (
-                              <option key={row.document_id} value={row.document_id}>{row.filename}</option>
-                            ))}
-                          </select>
+                            <HelpCircle className="w-3 h-3" />
+                            {showTagLegend ? 'Hide Tags' : 'Tag Legend'}
+                          </button>
                         </div>
-
-                        {/* Separator */}
-                        <div className="w-px h-7 bg-[#E5E7EB] flex-shrink-0" />
-
-                        {/* Tag Legend */}
-                        <button
-                          onClick={() => setShowTagLegend((prev) => !prev)}
-                          className="px-2.5 py-1.5 rounded-lg bg-white border border-[#E5E7EB] text-[11px] font-semibold text-[#6B6555] hover:bg-[#F5F4F0] transition-colors inline-flex items-center gap-1.5 flex-shrink-0"
-                          title={showTagLegend ? 'Hide tag legend' : 'Show tag legend'}
-                        >
-                          <HelpCircle className="w-3 h-3" />
-                          {showTagLegend ? 'Hide Tags' : 'Tag Legend'}
-                        </button>
                       </div>
                       {showTagLegend && (
                         <div className="px-4 pb-2 pt-1 border-t border-[#F0F0EC] bg-[#FAFAF7]">

@@ -6,6 +6,7 @@ import uuid
 from base64 import b64encode
 from io import StringIO
 import csv
+import json
 from typing import Any, Dict, List, Optional
 
 from docling.datamodel.base_models import InputFormat
