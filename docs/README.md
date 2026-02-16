@@ -1,3 +1,6 @@
+# Present in the repo as a part of the take home project template. Not part of our documentation
+
+
 Legal Tabular Review
 
 This is the project document for a take-home assignment. The goal is to extract key information from multiple legal documents and present it as a structured table for fast side-by-side comparison and review.
